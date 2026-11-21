@@ -5,7 +5,6 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Paint;
-import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.media.MediaMetadataRetriever;
@@ -82,6 +81,9 @@ public class Game {
         float acc;
         boolean overlapping;
         Task task;
+
+        String paramSpec;
+        ArrayList<Parameter> parameters;
 
         public Blk(String t) {
             this.t = t;
@@ -166,7 +168,7 @@ public class Game {
         // rotación, ancla y agarre
         public float rot, rot0, limL = -1f, limR = -1f;
         public String anchor = "", gtarget = "", gmode = "arrastrar";
-        public boolean norender, rotd, trimTransparent, collisionEnabled = true;
+        public boolean norender, rotd, collisionEnabled = true;
         Matrix tm;
         float gx, gy, ga, gacc, grot;
         Node par;
@@ -221,7 +223,6 @@ public class Game {
             o.put("ow", outline);
             o.put("vol", vol);
             o.put("font", font);
-            if (trimTransparent) o.put("trim", true);
             if (!collisionEnabled) o.put("collisionEnabled", false);
             if (rot != 0f) o.put("rot", rot);
             if (!anchor.isEmpty()) o.put("anc", anchor);
@@ -289,7 +290,6 @@ public class Game {
             n.outline = (float) o.optDouble("ow", 0);
             n.vol = (float) o.optDouble("vol", 1);
             n.font = o.optString("font", "");
-            n.trimTransparent = o.optBoolean("trim", false);
             n.collisionEnabled = o.optBoolean("collisionEnabled", true);
             JSONArray fr = o.optJSONArray("fr");
             if (fr != null) for (int i = 0; i < fr.length(); i++) n.frames.add(fr.getString(i));
@@ -347,6 +347,41 @@ public class Game {
         }
     }
 
+    // Posición relativa en el lienzo original de un PNG ya recortado fuera del motor.
+    static final class AssetOrder {
+        static final int MAX_PIXELS = 16777216, MAX_SIDE = 8192;
+        final int sourceWidth, sourceHeight, x, y, width, height;
+        final float left, top, right, bottom;
+
+        AssetOrder(JSONObject data) throws Exception {
+            sourceWidth = exactInt(data, "sourceWidth"); sourceHeight = exactInt(data, "sourceHeight");
+            x = exactInt(data, "x"); y = exactInt(data, "y");
+            width = exactInt(data, "width"); height = exactInt(data, "height");
+            if (sourceWidth < 1 || sourceHeight < 1 || sourceWidth > MAX_SIDE || sourceHeight > MAX_SIDE
+                    || (long) sourceWidth * sourceHeight > MAX_PIXELS || x < 0 || y < 0
+                    || width < 1 || height < 1 || x > sourceWidth - width || y > sourceHeight - height) {
+                throw new IllegalArgumentException("Coordenadas de imagen no válidas");
+            }
+            left = x / (float) sourceWidth; top = y / (float) sourceHeight;
+            right = (x + width) / (float) sourceWidth; bottom = (y + height) / (float) sourceHeight;
+        }
+
+        private static int exactInt(JSONObject data, String key) throws Exception {
+            Object value = data.get(key);
+            if (value instanceof Number) {
+                Number n = (Number) value;
+                int i = n.intValue();
+                if (n.doubleValue() == i) return i;
+            }
+            throw new IllegalArgumentException("Coordenada no entera: " + key);
+        }
+
+        JSONObject toJson() throws Exception {
+            return new JSONObject().put("sourceWidth", sourceWidth).put("sourceHeight", sourceHeight)
+                    .put("x", x).put("y", y).put("width", width).put("height", height);
+        }
+    }
+
     static class Mask {
         int w, h;
         boolean[] b;
@@ -375,6 +410,13 @@ public class Game {
                 if (has[1]) n.h = from[1] + (to[1] - from[1]) * k;
             }
         }
+    }
+
+    static final String FN_VOID = "Sin retorno (void)", FN_VALUE = "Devuelve un valor",
+            FN_COMPAT = "Automático (compatibilidad)";
+
+    static boolean callOption(Blk call, String flag, String field) {
+        return call.f.containsKey(flag) ? call.b(flag) : !call.s(field).trim().isEmpty();
     }
 
     static class Frame {
@@ -427,6 +469,8 @@ public class Game {
     public boolean edit;
     public Node sel;
     public float ox, oy, sx = 1, sy = 1;
+    float editorZoom = 1f, editorPanX, editorPanY;
+    float drawLeft, drawTop, drawRight, drawBottom;
 
     HashMap<String, Object> gvars = new HashMap<String, Object>();
     HashMap<String, Object> svars = new HashMap<String, Object>();
@@ -471,14 +515,14 @@ public class Game {
     ArrayList<Hold> holds = new ArrayList<Hold>();
     ArrayList<Task> tasks = new ArrayList<Task>();
     HashMap<String, Bitmap> cache = new HashMap<String, Bitmap>();
-    final HashMap<String, Rect> trimBounds = new HashMap<String, Rect>();
+    final HashMap<String, AssetOrder> assetOrders = new HashMap<String, AssetOrder>();
     HashMap<String, Bitmap> thumbs = new HashMap<String, Bitmap>();
     HashMap<String, Mask> masks = new HashMap<String, Mask>();
     HashMap<String, Typeface> tfCache = new HashMap<String, Typeface>();
     Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
     Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
     RectF rf = new RectF();
-    private final RectF editRect = new RectF();
+    private final RectF editRect = new RectF(), maskRect = new RectF();
 
     public Game(Src s) {
         src = s;
@@ -507,6 +551,10 @@ public class Game {
     }
 
     public String toJson(Set<Integer> keep) throws Exception {
+        return toJson(keep, null);
+    }
+
+    String toJson(Set<Integer> keep, Set<String> used) throws Exception {
         JSONObject o = new JSONObject();
         o.put("land", landscape);
         o.put("st", stretch);
@@ -532,6 +580,13 @@ public class Game {
             sa.put(so);
         }
         o.put("scenes", sa);
+        if (!assetOrders.isEmpty()) {
+            JSONObject orders = new JSONObject();
+            for (Map.Entry<String, AssetOrder> entry : assetOrders.entrySet()) {
+                if (used == null || used.contains(entry.getKey())) orders.put(entry.getKey(), entry.getValue().toJson());
+            }
+            if (orders.length() > 0) o.put("assetOrders", orders);
+        }
         if (!autoload.script.isEmpty()) o.put("autoload", Blk.arr(autoload.script));
         LinkedHashMap<String, String[]> en = new LinkedHashMap<String, String[]>();
         LinkedHashSet<String> ps = new LinkedHashSet<String>();
@@ -559,6 +614,14 @@ public class Game {
         JSONObject o = new JSONObject(json);
         Game g = new Game(s);
         g.autoload.script = Blk.list(o.optJSONArray("autoload"));
+        JSONObject orders = o.optJSONObject("assetOrders");
+        if (orders != null) {
+            Iterator<String> names = orders.keys();
+            while (names.hasNext()) {
+                String name = names.next();
+                g.assetOrders.put(name, new AssetOrder(orders.getJSONObject(name)));
+            }
+        }
         g.scenes.clear();
         g.landscape = o.optBoolean("land", true);
         g.stretch = o.optString("st", "keep");
@@ -933,7 +996,6 @@ public class Game {
         picture.rotd = source.rotd;
         if (source.rotd) picture.tm = new Matrix(source.tm);
         picture.res = source.res;
-        picture.trimTransparent = source.trimTransparent;
         picture.pressed = source.pressed;
         picture.dim = source.dim;
         picture.color = source.color;
@@ -1219,6 +1281,13 @@ public class Game {
             for (String s : n.frames) putSize(m, s, n.w, n.h);
         }
         for (Node n : all) markUnknown(n.script, m);
+        for (Map.Entry<String, AssetOrder> entry : assetOrders.entrySet()) {
+            float[] visible = m.get(entry.getKey());
+            if (visible == null || visible[0] <= 0f || visible[1] <= 0f) continue;
+            AssetOrder crop = entry.getValue();
+            visible[0] *= crop.width / (float) crop.sourceWidth;
+            visible[1] *= crop.height / (float) crop.sourceHeight;
+        }
         return m;
     }
 
@@ -1272,52 +1341,26 @@ public class Game {
 
     public void flush() {
         cache.clear();
-        trimBounds.clear();
         masks.clear();
         tfCache.clear();
     }
 
-    Rect trimmedBounds(String name, Bitmap bitmap) {
-        Rect bounds = trimBounds.get(name);
-        if (bounds != null) return bounds;
-        int w = bitmap.getWidth(), h = bitmap.getHeight();
-        bounds = new Rect(0, 0, w, h);
-        if (bitmap.hasAlpha()) {
-            int left = w, top = h, right = 0, bottom = 0;
-            int[] row = new int[w];
-            for (int y = 0; y < h; y++) {
-                bitmap.getPixels(row, 0, w, 0, y, w, 1);
-                for (int x = 0; x < w; x++) if ((row[x] >>> 24) != 0) {
-                    left = Math.min(left, x);
-                    right = Math.max(right, x + 1);
-                    top = Math.min(top, y);
-                    bottom = y + 1;
-                }
-            }
-            if (right == 0) bounds.setEmpty();
-            else bounds.set(left, top, right, bottom);
+    static String visualImage(Node n) {
+        if (n.type.equals("AnimatedSprite")) {
+            return n.frames.isEmpty() ? "" : n.frames.get(Math.max(0, Math.min(n.frame, n.frames.size() - 1)));
         }
-        trimBounds.put(name, bounds);
-        return bounds;
+        return n.type.equals("Image") || n.type.equals("ImageButton") ? n.res : "";
     }
 
-    Rect imageCrop(Node n, Bitmap bitmap) {
-        return bitmap != null && n.trimTransparent && n.type.equals("Image") ? trimmedBounds(n.res, bitmap) : null;
+    void imageBounds(Node n, String asset, float x, float y, RectF out) {
+        AssetOrder order = assetOrders.get(asset);
+        if (order == null) out.set(x, y, x + n.w, y + n.h);
+        else out.set(x + n.w * order.left, y + n.h * order.top,
+                x + n.w * order.right, y + n.h * order.bottom);
     }
 
-    static void imageBounds(Node n, Bitmap bitmap, Rect crop, float x, float y, RectF out) {
-        if (crop == null) {
-            out.set(x, y, x + n.w, y + n.h);
-        } else {
-            float sx = n.w / bitmap.getWidth(), sy = n.h / bitmap.getHeight();
-            out.set(x + crop.left * sx, y + crop.top * sy, x + crop.right * sx, y + crop.bottom * sy);
-        }
-    }
-
-    // Caja visible del editor; la geometría del proyecto y de los scripts conserva el lienzo original.
     void editBounds(Node n, float x, float y, RectF out) {
-        Bitmap bitmap = n.trimTransparent && n.type.equals("Image") ? img(n.res) : null;
-        imageBounds(n, bitmap, imageCrop(n, bitmap), x, y, out);
+        imageBounds(n, assetOrders.isEmpty() ? "" : visualImage(n), x, y, out);
     }
 
     void setEditPosition(Node n, boolean horizontal, float value) {
@@ -1360,6 +1403,12 @@ public class Game {
             return;
         }
         String a = n.type.equals("AnimatedSprite") ? (n.frames.isEmpty() ? "" : n.frames.get(0)) : n.res;
+        AssetOrder order = assetOrders.get(a);
+        if (order != null) {
+            n.w = order.sourceWidth;
+            n.h = order.sourceHeight;
+            return;
+        }
         Bitmap b = img(a);
         if (b != null) {
             n.w = b.getWidth();
@@ -1546,7 +1595,7 @@ public class Game {
 
     Object getVar(String name, Node self) {
         Frame fr = fnFrame();
-        if (fr != null && fr.loc.containsKey(name)) return fr.loc.get(name);
+        if (fr != null && fr.loc != null && fr.loc.containsKey(name)) return fr.loc.get(name);
         if (self != null && self.vars.containsKey(name)) return self.vars.get(name);
         if (svars.containsKey(name)) return svars.get(name);
         return gvars.get(name);
@@ -1554,7 +1603,7 @@ public class Game {
 
     void putVar(String name, Object v, Node self) {
         Frame fr = fnFrame();
-        if (fr != null && fr.loc.containsKey(name)) {
+        if (fr != null && fr.loc != null && fr.loc.containsKey(name)) {
             fr.loc.put(name, v);
             return;
         }
@@ -2088,8 +2137,10 @@ public class Game {
                 String sc = b.s("scope");
                 if (sc.equals("local")) {
                     Frame fr = fnFrame();
-                    if (fr != null) fr.loc.put(name, v);
-                    else svars.put(name, v);
+                    if (fr != null) {
+                        if (fr.loc == null) fr.loc = new HashMap<String, Object>();
+                        fr.loc.put(name, v);
+                    } else svars.put(name, v);
                 } else if (sc.equals("nodo")) self.vars.put(name, v);
                 else if (sc.equals("escena")) svars.put(name, v);
                 else gvars.put(name, v);
@@ -2369,7 +2420,7 @@ public class Game {
     }
 
     Frame pushFn(Task t, Blk fb, HashMap<String, Object> loc, Node prev, String rv) {
-        push(t, fb.body, 0, 0, null);
+        push(t, fb.body, 0, 0, fb);
         Frame f = t.stack.get(t.stack.size() - 1);
         f.fn = true;
         f.loc = loc;
@@ -2418,13 +2469,41 @@ public class Game {
         return r;
     }
 
+    static final class Parameter {
+        final int index;
+        final String name, defaultValue;
+        Parameter(int index, String name, String defaultValue) {
+            this.index = index;
+            this.name = name;
+            this.defaultValue = defaultValue;
+        }
+    }
+
+    static ArrayList<Parameter> parameters(Blk fn) {
+        String spec = fn.s("params");
+        if (fn.parameters != null && spec.equals(fn.paramSpec)) return fn.parameters;
+        fn.paramSpec = spec;
+        fn.parameters = new ArrayList<Parameter>();
+        if (spec.trim().isEmpty()) return fn.parameters;
+        int index = 0;
+        for (String field : splitArgs(spec)) {
+            int eq = field.indexOf('=');
+            String name = (eq < 0 ? field : field.substring(0, eq)).trim();
+            if (!name.isEmpty()) fn.parameters.add(new Parameter(index, name, eq < 0 ? "" : field.substring(eq + 1).trim()));
+            index++;
+        }
+        return fn.parameters;
+    }
+
     HashMap<String, Object> bind(Blk fb, Blk call, Node caller) {
+        ArrayList<Parameter> ps = parameters(fb);
+        if (ps.isEmpty()) return null;
         HashMap<String, Object> loc = new HashMap<String, Object>();
-        ArrayList<String> ps = splitArgs(fb.s("params")), as = splitArgs(call.s("args"));
-        for (int i = 0; i < ps.size(); i++) {
-            String p = ps.get(i);
-            if (p.isEmpty()) continue;
-            loc.put(p, i < as.size() && !as.get(i).isEmpty() ? val(as.get(i), caller) : Long.valueOf(0));
+        ArrayList<String> args = callOption(call, "passArgs", "args") ? splitArgs(call.s("args")) : null;
+        for (Parameter p : ps) {
+            String value = args != null && p.index < args.size() && !args.get(p.index).isEmpty()
+                    ? args.get(p.index) : p.defaultValue;
+            loc.put(p.name, value.isEmpty() ? Long.valueOf(0) : val(value, caller));
         }
         return loc;
     }
@@ -2605,13 +2684,22 @@ public class Game {
                         tasks.add(nt);
                         step(nt);
                     } else {
-                        pushFn(t, fb, loc, t.self, b.s("ret").trim());
+                        String target = !FN_VOID.equals(fb.s("returnMode")) && callOption(b, "saveResult", "ret")
+                                ? b.s("ret").trim() : "";
+                        pushFn(t, fb, loc, t.self, target);
                         t.self = fnode;
                     }
                     break;
                 }
-                case "return": {
-                    Object rv = b.s("val").trim().isEmpty() ? null : val(b.s("val"), t.self);
+                case "return":
+                case "exitFunction": {
+                    Frame fn = fnFrame();
+                    if (fn == null && b.t.equals("exitFunction")) break;
+                    String mode = fn == null ? "" : fn.blk.s("returnMode");
+                    boolean legacy = !FN_VOID.equals(mode) && !FN_VALUE.equals(mode);
+                    String result = b.s("val");
+                    Object rv = !b.t.equals("return") || FN_VOID.equals(mode) || result.trim().isEmpty()
+                            ? null : val(result, t.self);
                     while (!t.stack.isEmpty()) {
                         Frame x = pop(t);
                         if (x.fn) {
@@ -2619,7 +2707,7 @@ public class Game {
                             break;
                         }
                     }
-                    if (rv != null) svars.put("retorno", rv);
+                    if (rv != null && legacy) svars.put("retorno", rv);
                     break;
                 }
                 case "advance":
@@ -3109,7 +3197,7 @@ public class Game {
             float px = (useCam && !n.fixed) ? cx : vx;
             float py = (useCam && !n.fixed) ? cy : vy;
             if (inNode(n, px, py)) {
-                if (edit && n.trimTransparent) {
+                if (edit && !assetOrders.isEmpty()) {
                     editBounds(n, n.wx, n.wy, editRect);
                     if (!editRect.contains(mx, my)) continue;
                 }
@@ -3214,7 +3302,10 @@ public class Game {
         if (name.isEmpty()) return true;
         Mask m = mask(name, n.smartRes, n.smartMaj);
         if (m == null) return true;
-        int cx = (int) ((px - n.wx) / n.w * m.w), cy = (int) ((py - n.wy) / n.h * m.h);
+        imageBounds(n, name, n.wx, n.wy, maskRect);
+        if (!maskRect.contains(px, py)) return false;
+        int cx = (int) ((px - maskRect.left) / maskRect.width() * m.w);
+        int cy = (int) ((py - maskRect.top) / maskRect.height() * m.h);
         cx = Math.max(0, Math.min(m.w - 1, cx));
         cy = Math.max(0, Math.min(m.h - 1, cy));
         return m.b[cy * m.w + cx];
@@ -3284,7 +3375,7 @@ public class Game {
         int col = HC[h], row = HR[h];
         float left = col == 0 ? dx : 0f, right = col == 2 ? dx : 0f;
         float top = row == 0 ? dy : 0f, bottom = row == 2 ? dy : 0f;
-        float min = n.trimTransparent ? 1f : 4f;
+        float min = assetOrders.containsKey(visualImage(n)) ? 1f : 4f;
         if (editRect.width() + right - left < Math.min(min, editRect.width())) left = right = 0f;
         if (editRect.height() + bottom - top < Math.min(min, editRect.height())) top = bottom = 0f;
         if (left == 0f && right == 0f && top == 0f && bottom == 0f) return;
@@ -3347,10 +3438,12 @@ public class Game {
         if (m == null) return;
         p.setStyle(Paint.Style.FILL);
         p.setColor(0x6600FF00);
-        float cw = n.w / m.w, ch = n.h / m.h;
+        imageBounds(n, name, n.wx, n.wy, maskRect);
+        float cw = maskRect.width() / m.w, ch = maskRect.height() / m.h;
         for (int cy = 0; cy < m.h; cy++) {
             for (int cx = 0; cx < m.w; cx++) {
-                if (m.b[cy * m.w + cx]) c.drawRect(n.wx + cx * cw, n.wy + cy * ch, n.wx + (cx + 1) * cw, n.wy + (cy + 1) * ch, p);
+                if (m.b[cy * m.w + cx]) c.drawRect(maskRect.left + cx * cw, maskRect.top + cy * ch,
+                        maskRect.left + (cx + 1) * cw, maskRect.top + (cy + 1) * ch, p);
             }
         }
     }
@@ -3496,6 +3589,17 @@ public class Game {
     }
 
     // ================= Dibujo =================
+    boolean editorWorkspace() {
+        return edit && !snap;
+    }
+
+    void setEditorZoom(float zoom) {
+        float next = Math.max(0.125f, Math.min(8f, zoom));
+        editorPanX *= next / editorZoom;
+        editorPanY *= next / editorZoom;
+        editorZoom = next;
+    }
+
     void computeMap(int sw, int sh) {
         String m = edit ? "keep" : stretch;
         float ax = sw / (float) vw, ay = sh / (float) vh;
@@ -3507,18 +3611,39 @@ public class Game {
             sx = s;
             sy = s;
         }
-        ox = (sw - vw * sx) / 2f;
-        oy = (sh - vh * sy) / 2f;
+        boolean workspace = editorWorkspace();
+        if (workspace) {
+            sx *= editorZoom;
+            sy *= editorZoom;
+        }
+        ox = (sw - vw * sx) / 2f + (workspace ? editorPanX : 0f);
+        oy = (sh - vh * sy) / 2f + (workspace ? editorPanY : 0f);
+        drawLeft = workspace ? -ox / sx : 0f;
+        drawTop = workspace ? -oy / sy : 0f;
+        drawRight = workspace ? (sw - ox) / sx : vw;
+        drawBottom = workspace ? (sh - oy) / sy : vh;
     }
 
     public void draw(Canvas c, int sw, int sh) {
         computeMap(sw, sh);
-        c.drawColor(0xFF000000);
+        boolean workspace = editorWorkspace();
+        c.drawColor(workspace ? 0xFF272B33 : 0xFF000000);
         c.save();
         c.translate(ox, oy);
         c.scale(sx, sy);
-        c.clipRect(0, 0, vw, vh);
-        c.drawColor(bg);
+        if (workspace) {
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(bg);
+            c.drawRect(0, 0, vw, vh, p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(1f / Math.max(0.01f, sx));
+            p.setColor(0xFF798391);
+            c.drawRect(0, 0, vw, vh, p);
+            p.setStyle(Paint.Style.FILL);
+        } else {
+            c.clipRect(0, 0, vw, vh);
+            c.drawColor(bg);
+        }
         compute();
         boolean uc = useCam && !snap;
         if (uc) {
@@ -3573,6 +3698,7 @@ public class Game {
         Canvas c = new Canvas(bm);
         Node s0 = sel;
         String st = stretch;
+        float lastX = ox, lastY = oy, lastSx = sx, lastSy = sy;
         sel = null;
         stretch = "keep";
         snap = true;
@@ -3582,6 +3708,7 @@ public class Game {
             snap = false;
             stretch = st;
             sel = s0;
+            ox = lastX; oy = lastY; sx = lastSx; sy = lastSy;
         }
         return bm;
     }
@@ -3631,7 +3758,7 @@ public class Game {
 
     void drawBody(Canvas c, Node n, boolean cull) {
         if (!n.wvis || n.wa <= 0.003f) return;
-        if (cull && (n.wx > vw || n.wy > vh || n.wx + n.w < 0 || n.wy + n.h < 0)) return;
+        if (cull && (n.wx > drawRight || n.wy > drawBottom || n.wx + n.w < drawLeft || n.wy + n.h < drawTop)) return;
         int a = Math.max(0, Math.min(255, (int) (n.wa * 255)));
         rf.set(n.wx, n.wy, n.wx + n.w, n.wy + n.h);
         p.setStyle(Paint.Style.FILL);
@@ -3642,21 +3769,19 @@ public class Game {
                 int aa = (n.type.equals("ImageButton") && n.pressed && n.dim) ? a * 7 / 10 : a;
                 if (b != null) {
                     p.setAlpha(aa);
-                    Rect src = imageCrop(n, b);
-                    if (src != null) {
-                        if (src.isEmpty()) break;
-                        imageBounds(n, b, src, n.wx, n.wy, rf);
-                    }
-                    c.drawBitmap(b, src, rf, p);
+                    if (!assetOrders.isEmpty()) imageBounds(n, n.res, n.wx, n.wy, rf);
+                    c.drawBitmap(b, null, rf, p);
                 } else if (edit) {
                     placeholder(c, n, a);
                 }
                 break;
             }
             case "AnimatedSprite": {
-                Bitmap b = n.frames.isEmpty() ? null : img(n.frames.get(Math.min(n.frame, n.frames.size() - 1)));
+                String asset = visualImage(n);
+                Bitmap b = img(asset);
                 if (b != null) {
                     p.setAlpha(a);
+                    if (!assetOrders.isEmpty()) imageBounds(n, asset, n.wx, n.wy, rf);
                     c.drawBitmap(b, null, rf, p);
                 } else if (edit) {
                     placeholder(c, n, a);

@@ -16,7 +16,7 @@ public class GameView extends View {
     boolean edit, wasActive = true;
     long last;
     Game.Node drag;
-    float lx, ly, dens = 1f;
+    float lx, ly, screenX, screenY, dens = 1f;
     int rh = -1;
 
     public GameView(Context c, Game g, boolean edit) {
@@ -63,6 +63,8 @@ public class GameView extends View {
         float vx = g.toVx(e.getX()), vy = g.toVy(e.getY());
         if (a == MotionEvent.ACTION_DOWN) {
             rh = -1;
+            screenX = e.getX();
+            screenY = e.getY();
             if (g.editMode == Game.EDIT_SIZE && g.sel != null && g.sel.inOrder) {
                 rh = g.handleAt(g.sel, vx, vy, 26f * dens / Math.max(0.1f, g.sx));
             }
@@ -85,7 +87,13 @@ public class GameView extends View {
                 }
                 lx = vx;
                 ly = vy;
+            } else {
+                g.editorPanX += e.getX() - screenX;
+                g.editorPanY += e.getY() - screenY;
+                screenX = e.getX();
+                screenY = e.getY();
             }
+            invalidate();
         } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
             if (drag != null && l != null) l.moved(drag);
             drag = null;

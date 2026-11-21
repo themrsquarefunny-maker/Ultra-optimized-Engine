@@ -85,7 +85,8 @@ public class EditorActivity extends Activity {
         {"every", "Cada X segundos", "E", "secs:Segundos:N"},
         {"change", "Al cambiar una propiedad", "E", "node:Nodo:G", "prop:Propiedad:O:visible|modulate|x|y|w|h|text|rot"},
         {"orient", "Al cambiar de orientación", "E"},
-        {"func", "Función (evento)", "E", "name:Nombre de la función:T", "params:Parámetros (separados por coma):T"},
+        {"func", "Función (evento)", "E", "name:Nombre de la función:T", "params:Parámetros (opcional, separados por coma):T",
+            "returnMode:Tipo de retorno:O:" + Game.FN_VOID + "|" + Game.FN_VALUE + "|" + Game.FN_COMPAT},
         {"send", "Transmitir mensaje", "S", "msg:Mensaje:M", "scope:Alcance:O:escena|nodo|jerarquía|global"},
         {"call", "Invocar función", "S", "name:Función:F", "args:Valores (separados por coma):T",
             "par:Ejecutar en paralelo (sin esperar a que termine):B", "ret:Guardar lo que devuelva en la variable:Q"},
@@ -94,7 +95,8 @@ public class EditorActivity extends Activity {
             "ret:Guardar lo que devuelva en la variable:Q"},
         {"funcExists", "Comprobar función de nodo", "S", "node:Nodo que tiene la función:G", "name:Función:F",
             "ret:Guardar verdadero o falso en la variable:Q"},
-        {"return", "Devolver / salir de la función", "S", "val:Valor a devolver (opcional):V"},
+        {"return", "Devolver valor", "S", "val:Valor a devolver:V"},
+        {"exitFunction", "Salir de la función (sin devolver)", "S"},
         {"if", "Si", "S", "tm:Contar el tiempo de por(X):O:esperar|reloj propio", "expr:Condición:T"},
         {"elif", "Sino, Si", "S", "tm:Contar el tiempo de por(X):O:esperar|reloj propio", "expr:Condición:T"},
         {"else", "Sino", "S"},
@@ -167,12 +169,12 @@ public class EditorActivity extends Activity {
     };
 
     Game g;
-    Bitmap pickNb;
     GameView pv;
     String pid;
     File dir, adir, jf, iconFile;
     Game.Node sel, scriptOwner;
-    static final int IMPORT_FONT = 4;
+    static final int IMPORT_FONT = 4, IMPORT_ORDERS = 5;
+    boolean importingOrders;
     int fontNodeId = -1;
     LinearLayout list, props;
     TextView sceneLabel, tIconInfo;
@@ -288,11 +290,19 @@ public class EditorActivity extends Activity {
         return new String(readBytes(f), "UTF-8");
     }
 
-    void save() {
-        try (FileOutputStream o = new FileOutputStream(jf)) {
-            o.write(g.toJson().getBytes("UTF-8"));
+    boolean save() {
+        android.util.AtomicFile project = new android.util.AtomicFile(jf);
+        FileOutputStream out = null;
+        try {
+            byte[] data = g.toJson().getBytes("UTF-8");
+            out = project.startWrite();
+            out.write(data);
+            project.finishWrite(out);
+            return true;
         } catch (Exception e) {
+            if (out != null) project.failWrite(out);
             Toast.makeText(this, "No pude guardar: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            return false;
         }
     }
 
@@ -324,8 +334,8 @@ public class EditorActivity extends Activity {
             }
         };
         g = null;
-        try {
-            if (jf.exists()) g = Game.fromJson(readText(jf), src);
+        try (InputStream saved = new android.util.AtomicFile(jf).openRead()) {
+            g = Game.fromJson(new String(Exporter.readAll(saved), "UTF-8"), src);
         } catch (Exception e) {
             g = null;
         }
@@ -346,6 +356,14 @@ public class EditorActivity extends Activity {
             }
         };
         root.addView(pv, new LinearLayout.LayoutParams(MP, dp(230)));
+        LinearLayout zoomPanel = new LinearLayout(this);
+        zoomPanel.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView zoomLabel = label("Zoom: 100%");
+        zoomPanel.addView(btn("−", x -> changeEditorZoom(g.editorZoom / 1.25f, false, zoomLabel)));
+        zoomPanel.addView(btn("+", x -> changeEditorZoom(g.editorZoom * 1.25f, false, zoomLabel)));
+        zoomPanel.addView(btn("Centrar", x -> changeEditorZoom(1f, true, zoomLabel)));
+        zoomPanel.addView(zoomLabel);
+        root.addView(zoomPanel);
 
         ScrollView sv = new ScrollView(this);
         LinearLayout col = vbox();
@@ -653,8 +671,6 @@ public class EditorActivity extends Activity {
                     if (fitBox[0] != null && fitBox[0].isChecked()) fitBox[0].setChecked(false);
                 });
             }
-        } else if (n.trimTransparent && shown.isEmpty()) {
-            props.addView(label("La imagen es totalmente transparente: desactiva el recorte para editar su caja."));
         }
 
         if (!n.type.equals("Sound") && !n.type.equals("Camera2D") && !n.type.equals("Anchor")) {
@@ -670,15 +686,8 @@ public class EditorActivity extends Activity {
                     s -> n.smartRes = Math.max(8, Math.min(256, (int) pf(s, n.smartRes))));
             if (n.type.equals("ImageButton")) {
                 check(props, "Oscurecer al tocar", n.dim, s -> n.dim = s.equals("true"));
-            } else {
-                check(props, "Recortar bordes transparentes", n.trimTransparent, s -> {
-                    n.trimTransparent = s.equals("true");
-                    pv.invalidate();
-                    props.post(() -> rebuildProps());
-                });
-                props.addView(label("Ajusta la selección, los tiradores y las medidas a lo visible sin mover la imagen. "
-                        + "Desactívalo para volver a editar la caja completa."));
             }
+            if (g.assetOrders.containsKey(n.res)) props.addView(label("Imagen recortada externamente: coordenadas importadas."));
             props.addView(btn("Elegir imagen", x -> chooseAsset(true, s -> {
                 n.res = s;
                 if (n.fit) g.fitNode(n);
@@ -1075,7 +1084,18 @@ public class EditorActivity extends Activity {
         startActivityForResult(i, 1);
     }
 
+    void changeEditorZoom(float zoom, boolean center, TextView status) {
+        g.setEditorZoom(zoom);
+        if (center) g.editorPanX = g.editorPanY = 0f;
+        status.setText("Zoom: " + Math.round(g.editorZoom * 100f) + "%");
+        pv.invalidate();
+    }
+
     void assetsDialog() {
+        if (importingOrders) {
+            toast("Espera a que termine la importación de órdenes");
+            return;
+        }
         final ArrayList<String> all = new ArrayList<String>();
         File[] fs = adir.listFiles();
         if (fs != null) for (File f : fs) all.add(f.getName());
@@ -1088,12 +1108,22 @@ public class EditorActivity extends Activity {
                 final String nm = all.get(i);
                 new AlertDialog.Builder(this).setTitle("¿Eliminar " + nm + "?")
                         .setPositiveButton("Eliminar", (d2, w) -> {
-                            new File(adir, nm).delete();
-                            g.flush();
+                            if (new File(adir, nm).delete()) {
+                                g.assetOrders.remove(nm);
+                                save();
+                                g.flush();
+                                pv.invalidate();
+                            }
                         }).setNegativeButton("Cancelar", null).show();
             });
         }
         b.setNeutralButton("Importar…", (d, i) -> startImport());
+        b.setPositiveButton("Importar órdenes", (d, i) -> {
+            Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            pick.addCategory(Intent.CATEGORY_OPENABLE);
+            pick.setType("*/*");
+            startActivityForResult(pick, IMPORT_ORDERS);
+        });
         b.setNegativeButton("Cerrar", null).show();
     }
 
@@ -1160,7 +1190,9 @@ public class EditorActivity extends Activity {
         if (req == IMPORT_FONT) fontNodeId = -1;
         if (res != RESULT_OK || d == null) return;
         try {
-            if (req == IMPORT_FONT && d.getData() != null) {
+            if (req == IMPORT_ORDERS && d.getData() != null) {
+                importOrders(d.getData());
+            } else if (req == IMPORT_FONT && d.getData() != null) {
                 String name = nameOf(d.getData());
                 if (!isFont(name)) throw new IOException("Elige un archivo .ttf o .otf");
                 for (Game.Node node : g.allNodes()) if (node.id == requestedNode && node.type.equals("Label")) {
@@ -1204,6 +1236,41 @@ public class EditorActivity extends Activity {
         } catch (Exception e) {
             Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
+    }
+
+    void importOrders(Uri uri) {
+        if (importingOrders) return;
+        importingOrders = true;
+        toast("Importando órdenes…");
+        new Thread(() -> {
+            try {
+                LinkedHashMap<String, Game.AssetOrder> loaded = AssetOrdersImport.load(
+                        getContentResolver().openInputStream(uri), adir);
+                runOnUiThread(() -> {
+                    importingOrders = false;
+                    if (isDestroyed() || isFinishing()) {
+                        for (String name : loaded.keySet()) new File(adir, name).delete();
+                        return;
+                    }
+                    g.assetOrders.putAll(loaded);
+                    if (!save()) {
+                        for (String name : loaded.keySet()) {
+                            g.assetOrders.remove(name);
+                            new File(adir, name).delete();
+                        }
+                        return;
+                    }
+                    rebuildProps();
+                    pv.invalidate();
+                    toast("Imágenes y órdenes importadas: " + loaded.size());
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    importingOrders = false;
+                    if (!isDestroyed()) toast("No pude importar las órdenes: " + e.getMessage());
+                });
+            }
+        }, "Importar ordenes").start();
     }
 
     // ================= Ajustes del proyecto =================
@@ -1399,16 +1466,16 @@ public class EditorActivity extends Activity {
 
     void doExport(final String name, final String ver, final int imgMode, final String pkg) {
         exportName = name;
+        final Set<String> used = g.usedAssets();
         final String json;
         final byte[] icon;
         try {
-            json = g.toJson();
+            json = g.toJson(null, used);
             icon = iconFile.exists() ? readBytes(iconFile) : null;
         } catch (Exception e) {
             toast("Error: " + e.getMessage());
             return;
         }
-        final Set<String> used = g.usedAssets();
         final HashMap<String, float[]> sizes = g.imageSizes();
         final boolean noDown = g.hasSizeTween();
         toast("Exportando…");
@@ -1448,7 +1515,7 @@ public class EditorActivity extends Activity {
             collectVars(n.script, v, m);
             for (Game.Blk e : n.script) {
                 if (!e.t.equals("func")) continue;
-                for (String q : e.s("params").split(",")) if (!q.trim().isEmpty()) v.add(q.trim());
+                for (Game.Parameter parameter : Game.parameters(e)) v.add(parameter.name);
             }
         }
         return v;
@@ -1668,9 +1735,11 @@ public class EditorActivity extends Activity {
         TextView info;
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         RectF r = new RectF();
-        Bitmap nb;
+        final Bitmap nb;
+        final Game.AssetOrder imageOrder;
+        final RectF cropped = new RectF();
 
-        PickView(Context c, Bitmap bm, float gw, float gh, float x, float y, TextView info) {
+        PickView(Context c, Bitmap bm, float gw, float gh, float x, float y, TextView info, Bitmap nb, Game.AssetOrder imageOrder) {
             super(c);
             this.bm = bm;
             this.gw = gw;
@@ -1678,8 +1747,15 @@ public class EditorActivity extends Activity {
             this.gx = x;
             this.gy = y;
             this.info = info;
-            this.nb = pickNb;
+            this.nb = nb;
+            this.imageOrder = imageOrder;
             upd();
+        }
+
+        RectF croppedPreview(float s, float ox, float oy) {
+            cropped.set(ox + (gx + gw * imageOrder.left) * s, oy + (gy + gh * imageOrder.top) * s,
+                    ox + (gx + gw * imageOrder.right) * s, oy + (gy + gh * imageOrder.bottom) * s);
+            return cropped;
         }
 
         float scale() {
@@ -1711,7 +1787,8 @@ public class EditorActivity extends Activity {
             if (nb != null) {
                 p.setStyle(Paint.Style.FILL);
                 p.setColor(0xFFFFFFFF);
-                c.drawBitmap(nb, null, r, p);
+                if (imageOrder == null) c.drawBitmap(nb, null, r, p);
+                else c.drawBitmap(nb, null, croppedPreview(s, ox, oy), p);
             } else {
                 p.setStyle(Paint.Style.FILL);
                 p.setColor(0x66FF00FF);
@@ -1748,7 +1825,7 @@ public class EditorActivity extends Activity {
         }
     }
 
-    void showPicker(Bitmap bm, boolean fromGame, float gw, float gh, float x0, float y0, final Xy cb) {
+    void showPicker(Bitmap bm, boolean fromGame, float gw, float gh, float x0, float y0, Bitmap nb, Game.AssetOrder imageOrder, final Xy cb) {
         final Dialog d = new Dialog(this, android.R.style.Theme_Material_NoActionBar);
         LinearLayout root = vbox();
         root.setBackgroundColor(0xFF121212);
@@ -1759,7 +1836,7 @@ public class EditorActivity extends Activity {
         root.addView(head);
         final TextView info = new TextView(this);
         info.setPadding(dp(12), dp(8), dp(12), dp(8));
-        final PickView pk = new PickView(this, bm, gw, gh, x0, y0, info);
+        final PickView pk = new PickView(this, bm, gw, gh, x0, y0, info, nb, imageOrder);
         root.addView(pk, new LinearLayout.LayoutParams(MP, 0, 1));
         root.addView(info);
         LinearLayout row = new LinearLayout(this);
@@ -1805,10 +1882,9 @@ public class EditorActivity extends Activity {
             fromGame = bm != null;
         }
         if (bm == null) bm = g.snapshot(960);
-        String nbName = "";
-        if (tn != null) nbName = tn.type.equals("AnimatedSprite") ? (tn.frames.isEmpty() ? "" : tn.frames.get(0)) : tn.res;
-        pickNb = nbName == null || nbName.isEmpty() ? null : g.img(nbName);
-        showPicker(bm, fromGame, gw, gh, cx, cy, (rx, ry) -> {
+        String nbName = tn == null ? "" : Game.visualImage(tn);
+        Bitmap preview = nbName.isEmpty() ? null : g.img(nbName);
+        showPicker(bm, fromGame, gw, gh, cx, cy, preview, g.assetOrders.get(nbName), (rx, ry) -> {
             ex.setText(trimf(rx - fox));
             ey.setText(trimf(ry - foy));
         });
@@ -1834,6 +1910,15 @@ public class EditorActivity extends Activity {
     }
 
     String describe(Game.Blk b) {
+        if (b.t.equals("func")) return "Función " + functionSignature(b);
+        if (isCall(b)) {
+            boolean exact = b.t.equals("callNode");
+            String prefix = exact ? (b.s("node").isEmpty() ? "self" : b.s("node")) + "." : "";
+            String args = Game.callOption(b, "passArgs", "args") ? b.s("args") : "";
+            String ret = !b.b("par") && Game.callOption(b, "saveResult", "ret") ? b.s("ret") : "";
+            return "Invocar " + prefix + b.s("name") + "(" + args + ")"
+                    + (b.b("par") ? " · en paralelo" : ret.isEmpty() ? "" : " → " + ret);
+        }
         String[] sp = specOf(b.t);
         if (b.t.equals("if") || b.t.equals("elif") || b.t.equals("while")) {
             StringBuilder sc = new StringBuilder(sp[1] + "  " + (b.f.containsKey("expr") ? b.s("expr") : oldCond(b)));
@@ -2011,7 +2096,143 @@ public class EditorActivity extends Activity {
                 }).show();
     }
 
+    static boolean isCall(Game.Blk block) {
+        return block.t.equals("call") || block.t.equals("callNode");
+    }
+
+    static String functionSignature(Game.Blk fn) {
+        String mode = fn.s("returnMode");
+        String result = Game.FN_VOID.equals(mode) ? "void" : Game.FN_VALUE.equals(mode) ? "valor" : "auto";
+        return fn.s("name").trim() + "(" + fn.s("params").trim() + ") → " + result;
+    }
+
+    static Game.Blk declaredFunction(Game.Node owner, String name) {
+        if (owner != null && !name.isEmpty()) for (Game.Blk fn : owner.script) {
+            if (fn.t.equals("func") && fn.s("name").trim().equals(name)) return fn;
+        }
+        return null;
+    }
+
+    Game.Node chosenFunctionNode(Spinner node) {
+        String name = String.valueOf(node.getSelectedItem());
+        if (name.equals("self")) return scriptOwner;
+        Game.Node owner = g.byName(name);
+        return owner == null && name.equals(g.autoload.name) ? g.autoload : owner;
+    }
+
+    Game.Blk callSignature(Spinner node, String name) {
+        if (node != null) return declaredFunction(chosenFunctionNode(node), name);
+        Game.Blk fn = declaredFunction(scriptOwner, name);
+        if (fn == null) fn = declaredFunction(g.autoload, name);
+        if (fn != null) return fn;
+        for (Game.Node owner : g.nodes) {
+            fn = declaredFunction(owner, name);
+            if (fn != null) return fn;
+        }
+        return null;
+    }
+
+    static boolean hasValueReturn(ArrayList<Game.Blk> body) {
+        for (Game.Blk block : body) {
+            if (block.t.equals("return") && !block.s("val").trim().isEmpty()) return true;
+            if (hasValueReturn(block.body) || hasValueReturn(block.els)) return true;
+        }
+        return false;
+    }
+
+    void editCall(Game.Blk block, Runnable ref) {
+        LinearLayout form = vbox();
+        form.setPadding(dp(20), dp(10), dp(20), dp(10));
+        final Spinner node;
+        if (block.t.equals("callNode")) {
+            ArrayList<String> names = new ArrayList<String>(java.util.Arrays.asList(nodeNames()));
+            String current = block.s("node").trim();
+            if (current.isEmpty()) current = "self";
+            if (!names.contains(current)) names.add(current);
+            node = spinner(names.toArray(new String[0]));
+            node.setSelection(names.indexOf(current), false);
+            form.addView(label("Nodo que tiene la función"));
+            form.addView(node);
+        } else node = null;
+
+        final Runnable[] refresh = {() -> { }};
+        EditText name = field(form, "Función", block.s("name"), TXT, s -> refresh[0].run());
+        form.addView(btn("Elegir función", x -> {
+            ArrayList<Game.Node> owners = new ArrayList<Game.Node>();
+            if (node == null) {
+                owners.add(g.autoload);
+                owners.addAll(g.nodes);
+            } else {
+                Game.Node chosen = chosenFunctionNode(node);
+                if (chosen != null) owners.add(chosen);
+            }
+            ArrayList<String> choices = new ArrayList<String>(funcNames(owners));
+            if (choices.isEmpty()) {
+                toast("Primero crea una función en el script");
+                return;
+            }
+            String[] labels = new String[choices.size()];
+            for (int i = 0; i < labels.length; i++) labels[i] = functionSignature(callSignature(node, choices.get(i)));
+            new AlertDialog.Builder(this).setTitle("Elegir función").setItems(labels, (d, i) -> {
+                name.setText(choices.get(i));
+            }).show();
+        }));
+        TextView signature = label("");
+        form.addView(signature);
+
+        CheckBox pass = check(form, "Pasar argumentos", Game.callOption(block, "passArgs", "args"), s -> refresh[0].run());
+        LinearLayout argsBox = vbox();
+        EditText args = field(argsBox, "Valores en el orden de los parámetros (separados por coma)", block.s("args"), TXT, s -> { });
+        form.addView(argsBox);
+        CheckBox parallel = check(form, "Ejecutar en paralelo (sin esperar)", block.b("par"), s -> refresh[0].run());
+        CheckBox save = check(form, "Guardar resultado", Game.callOption(block, "saveResult", "ret"), s -> refresh[0].run());
+        LinearLayout resultBox = vbox();
+        EditText result = field(resultBox, "Variable de destino", block.s("ret"), TXT, s -> { });
+        resultBox.addView(btn("Elegir variable", x -> pickValue(result, "Q")));
+        form.addView(resultBox);
+
+        refresh[0] = () -> {
+            String named = name.getText().toString().trim();
+            Game.Blk fn = callSignature(node, named);
+            String params = fn == null ? "" : fn.s("params").trim();
+            boolean acceptsArgs = fn == null || !Game.parameters(fn).isEmpty();
+            boolean returnsValue = fn == null || (!Game.FN_VOID.equals(fn.s("returnMode"))
+                    && (Game.FN_VALUE.equals(fn.s("returnMode")) || hasValueReturn(fn.body)));
+            boolean canSave = returnsValue && !parallel.isChecked();
+            signature.setText(fn != null ? functionSignature(fn) : named.isEmpty() ? "Elige la función que quieres ejecutar."
+                    : "No encontré esa función en el editor. Comprueba el nombre y el nodo.");
+            args.setHint(params);
+            if (returnsValue && parallel.isChecked()) signature.append("\nLas llamadas en paralelo no guardan el resultado en el bloque que las invoca.");
+            pass.setVisibility(acceptsArgs ? View.VISIBLE : View.GONE);
+            argsBox.setVisibility(acceptsArgs && pass.isChecked() ? View.VISIBLE : View.GONE);
+            save.setVisibility(canSave ? View.VISIBLE : View.GONE);
+            resultBox.setVisibility(canSave && save.isChecked() ? View.VISIBLE : View.GONE);
+        };
+        if (node != null) node.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> a, View v, int pos, long id) { refresh[0].run(); }
+            @Override public void onNothingSelected(AdapterView<?> a) { refresh[0].run(); }
+        });
+        refresh[0].run();
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(form);
+        new AlertDialog.Builder(this).setTitle(specOf(block.t)[1]).setView(scroll)
+                .setPositiveButton("Aceptar", (d, w) -> {
+                    if (node != null) block.f.put("node", String.valueOf(node.getSelectedItem()));
+                    block.f.put("name", name.getText().toString().trim());
+                    block.f.put("passArgs", String.valueOf(pass.getVisibility() == View.VISIBLE && pass.isChecked()));
+                    block.f.put("args", args.getText().toString());
+                    block.f.put("par", String.valueOf(parallel.isChecked()));
+                    block.f.put("saveResult", String.valueOf(save.getVisibility() == View.VISIBLE && save.isChecked()));
+                    block.f.put("ret", result.getText().toString().trim());
+                    ref.run();
+                }).setNegativeButton("Cancelar", null).show();
+    }
+
     void editBlock(final Game.Blk b, final Runnable ref) {
+        if (isCall(b)) {
+            editCall(b, ref);
+            return;
+        }
         final String[] sp = specOf(b.t);
         if (sp.length <= 3) {
             toast("Este bloque no tiene ajustes");
@@ -2049,11 +2270,8 @@ public class EditorActivity extends Activity {
                     LinearLayout r = new LinearLayout(this);
                     r.addView(e, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                     r.addView(btn("▼", x -> {
-                        if (kind.equals("F") && (b.t.equals("callNode") || b.t.equals("funcExists"))) {
-                            Spinner nodes = (Spinner) views.get(keys.indexOf("node"));
-                            String selected = String.valueOf(nodes.getSelectedItem());
-                            Game.Node owner = selected.equals("self") ? scriptOwner : g.byName(selected);
-                            if (owner == null && selected.equals(g.autoload.name)) owner = g.autoload;
+                        if (kind.equals("F") && b.t.equals("funcExists")) {
+                            Game.Node owner = chosenFunctionNode((Spinner) views.get(keys.indexOf("node")));
                             pickFunction(e, owner == null ? Collections.emptyList() : Collections.singletonList(owner));
                         } else pickValue(e, kind);
                     }));
@@ -2081,7 +2299,8 @@ public class EditorActivity extends Activity {
                 else if (kind.equals("Z")) opts = withEmpty(enumNames());
                 else opts = opt.split("\\|");
                 Spinner s = spinner(opts);
-                for (int k = 0; k < opts.length; k++) if (opts[k].equals(cur)) s.setSelection(k);
+                if (b.t.equals("func") && key.equals("returnMode") && cur.isEmpty()) s.setSelection(opts.length - 1);
+                else for (int k = 0; k < opts.length; k++) if (opts[k].equals(cur)) s.setSelection(k);
                 w = s;
                 v.addView(s);
             }
@@ -2090,6 +2309,8 @@ public class EditorActivity extends Activity {
             kinds.add(kind);
             holders.add(holder);
         }
+        if (b.t.equals("func")) v.addView(label("Si solo realiza una acción, elige Sin retorno (void). "
+                + "Usa Salir de la función para terminar antes. Puedes declarar valores por defecto, por ejemplo: distancia=30, rápido=false."));
         if (b.t.equals("visualClone")) {
             v.addView(label("No crea otro nodo, script ni colisión. Si compartes cambios, la copia sigue al original "
                     + "con el desplazamiento indicado; si no, conserva la apariencia y posición del momento."));
