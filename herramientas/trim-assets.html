@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Motor v13 · Recortar assets</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui;background:#141820;color:#eef1f6}
+main{max-width:42rem;margin:6vh auto;padding:1.5rem;border:1px solid #444e60;border-radius:1rem;background:#202632}
+h1{margin-top:0} p{line-height:1.6} label,input{display:block;margin:.75rem 0} button{padding:.7rem 1rem;border:0;border-radius:.4rem;background:#a7e3ff;color:#14202e;font:inherit;font-weight:700} button:disabled{opacity:.5} #state{white-space:pre-wrap}
+</style>
+<main>
+<h1>Recortar assets de Motor</h1>
+<p>Quita solo los bordes con alfa cero. El ZIP incluye los PNG recortados y el tamaño y desplazamiento originales, para que Motor los dibuje donde estaban.</p>
+<label for="images">Imágenes del proyecto</label>
+<input id="images" type="file" accept="image/png,image/webp,image/jpeg,image/bmp,image/gif" multiple>
+<button id="download" type="button" disabled>Convertir y descargar ZIP</button>
+<p id="state" role="status">Selecciona imágenes para empezar.</p>
+<p>En el editor: <strong>Assets → Importar órdenes</strong>. Selecciona el ZIP completo y luego elige las imágenes importadas en tus nodos. Funciona sin conexión. No sube archivos a ningún servidor.</p>
+</main>
+<script>
+'use strict';
+const input = document.querySelector('#images');
+const button = document.querySelector('#download');
+const state = document.querySelector('#state');
+const MAX_FILES = 256, MAX_SIDE = 8192, MAX_PIXELS = 16777216, MAX_BYTES = 64 * 1024 * 1024;
+const encoder = new TextEncoder();
+const crcTable = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let v = i;
+  for (let j = 0; j < 8; j++) v = (v >>> 1) ^ ((v & 1) ? 0xedb88320 : 0);
+  crcTable[i] = v;
+}
+function crc32(bytes) {
+  let v = 0xffffffff;
+  for (const b of bytes) v = crcTable[(v ^ b) & 255] ^ (v >>> 8);
+  return (v ^ 0xffffffff) >>> 0;
+}
+function header(length, signature) {
+  const data = new DataView(new ArrayBuffer(length));
+  data.setUint32(0, signature, true);
+  return data;
+}
+async function archive(entries) {
+  const parts = [], directory = [];
+  let offset = 0, directorySize = 0;
+  for (const entry of entries) {
+    const name = encoder.encode(entry.path), size = entry.blob.size;
+    const crc = crc32(new Uint8Array(await entry.blob.arrayBuffer()));
+    // PNG ya está comprimido: almacena sin otro paso de compresión.
+    const local = header(30, 0x04034b50), index = header(46, 0x02014b50);
+    local.setUint16(4, 20, true); local.setUint16(12, 33, true);
+    local.setUint32(14, crc, true); local.setUint32(18, size, true);
+    local.setUint32(22, size, true); local.setUint16(26, name.length, true);
+    index.setUint16(4, 20, true); index.setUint16(6, 20, true); index.setUint16(14, 33, true);
+    index.setUint32(16, crc, true); index.setUint32(20, size, true);
+    index.setUint32(24, size, true); index.setUint16(28, name.length, true);
+    index.setUint32(42, offset, true);
+    parts.push(local.buffer, name, entry.blob);
+    directory.push(index.buffer, name);
+    offset += 30 + name.length + size;
+    directorySize += 46 + name.length;
+  }
+  const end = header(22, 0x06054b50);
+  end.setUint16(8, entries.length, true); end.setUint16(10, entries.length, true);
+  end.setUint32(12, directorySize, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...directory, end.buffer], {type: 'application/zip'});
+}
+function alphaBounds(pixels, w, h) {
+  let left = w, top = h, right = 0, bottom = 0;
+  for (let y = 0, offset = 3; y < h; y++) {
+    for (let x = 0; x < w; x++, offset += 4) if (pixels[offset] !== 0) {
+      left = Math.min(left, x); right = Math.max(right, x + 1);
+      top = Math.min(top, y); bottom = y + 1;
+    }
+  }
+  return right ? {x: left, y: top, width: right - left, height: bottom - top} : null;
+}
+async function crop(file) {
+  if (file.size > MAX_BYTES) throw new Error('archivo demasiado grande');
+  const image = await createImageBitmap(file);
+  const canvas = document.createElement('canvas');
+  const sourceWidth = image.width, sourceHeight = image.height;
+  try {
+    if (sourceWidth > MAX_SIDE || sourceHeight > MAX_SIDE || sourceWidth * sourceHeight > MAX_PIXELS) {
+      throw new Error('supera 8192 por lado o 16 megapíxeles');
+    }
+    canvas.width = sourceWidth; canvas.height = sourceHeight;
+    const ctx = canvas.getContext('2d', {willReadFrequently: true});
+    ctx.drawImage(image, 0, 0);
+    const data = ctx.getImageData(0, 0, sourceWidth, sourceHeight);
+    const bounds = alphaBounds(data.data, sourceWidth, sourceHeight);
+    if (!bounds) return null;
+    canvas.width = bounds.width; canvas.height = bounds.height;
+    ctx.putImageData(data, -bounds.x, -bounds.y);
+    const blob = await new Promise((resolve, reject) => canvas.toBlob(
+      result => result ? resolve(result) : reject(new Error('no se pudo crear el PNG')), 'image/png'));
+    return {blob, info: {sourceWidth, sourceHeight, ...bounds}};
+  } finally {
+    image.close(); canvas.width = canvas.height = 1;
+  }
+}
+input.addEventListener('change', () => {
+  button.disabled = input.files.length === 0;
+  state.textContent = input.files.length ? `${input.files.length} imagen(es) seleccionada(s).` : 'Selecciona imágenes para empezar.';
+});
+button.addEventListener('click', async () => {
+  const selected = Array.from(input.files);
+  if (!selected.length || selected.length > MAX_FILES) {
+    state.textContent = 'Selecciona de 1 a 256 imágenes por ZIP.';
+    return;
+  }
+  input.disabled = button.disabled = true;
+  const entries = [], assets = [], skipped = [];
+  let total = 0;
+  try {
+    for (let i = 0; i < selected.length; i++) {
+      const file = selected[i];
+      state.textContent = `Procesando ${i + 1}/${selected.length}: ${file.name}`;
+      try {
+        const result = await crop(file);
+        if (!result) { skipped.push(`${file.name}: totalmente transparente`); continue; }
+        if (total + result.blob.size > MAX_BYTES - 256 * 1024) {
+          skipped.push(`${file.name}: el lote supera 64 MiB`); continue;
+        }
+        total += result.blob.size;
+        const base = file.name.replace(/\.[^.]*$/, '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 75) || 'imagen';
+        const name = `${base}.png`, path = `assets/${i + 1}-${name}`;
+        entries.push({path, blob: result.blob});
+        assets.push({file: path, name, ...result.info});
+      } catch (error) { skipped.push(`${file.name}: ${error.message}`); }
+    }
+    if (!entries.length) throw new Error('No se pudo generar ninguna imagen.');
+    entries.push({path: 'ordenes.json', blob: new Blob([JSON.stringify({format: 'motor-asset-orders-v1', assets})])});
+    const url = URL.createObjectURL(await archive(entries));
+    const link = document.createElement('a');
+    link.href = url; link.download = 'ordenes-assets.zip';
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    state.textContent = `ZIP listo: ${assets.length} imagen(es).`;
+  } catch (error) {
+    state.textContent = error.message;
+  } finally {
+    if (skipped.length) state.textContent += '\nOmitidas:\n' + skipped.join('\n');
+    input.disabled = button.disabled = false;
+  }
+});
+</script>
+</html>

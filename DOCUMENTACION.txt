@@ -1,0 +1,160 @@
+MOTOR v13 — GUÍA DE EVENTOS Y BLOQUES
+====================================
+
+EMPEZAR
+Un evento indica cuándo se ejecutan los bloques anidados debajo. Un bloque
+indica qué hacer. En un selector de nodo, «self» es el dueño del script.
+X crece hacia la derecha; Y hacia abajo. Los ángulos positivos giran en
+sentido horario. Si mueves un hijo que sigue a su padre, X/Y son locales.
+
+Ejemplo: en ImageButton usa Al mantener presionado → Visibilidad de Image2
+true; en la sección Al soltar usa Visibilidad false. No necesitas consultar
+la variable cada fotograma si solo reaccionas a estos dos cambios.
+
+EDICIÓN, ZOOM Y ASSETS
+• + y − modifican solo la vista del editor; Centrar restaura el 100%.
+  Arrastra espacio vacío para desplazar la vista. El borde marca el área del
+  viewport: verás los nodos que quedan fuera, pero el juego los sigue recortando.
+  Los nodos marcados como invisibles no se vuelven visibles al cambiar el zoom.
+• Abre trim-assets.html en un navegador y selecciona las imágenes. Descarga
+  ordenes-assets.zip y en Motor toca Assets → Importar órdenes. Luego elige
+  el recurso importado en Image, ImageButton o AnimatedSprite. El PNG ya se
+  guarda sin márgenes; la orden guarda el desplazamiento y tamaño original.
+  Los assets existentes no se sobrescriben: si el nombre ya existe, el
+  editor añade un prefijo numérico. Importar no reasigna ningún nodo.
+• El HTML omite imágenes totalmente transparentes. Admite hasta 256 archivos
+  por lote, 8192 píxeles por lado, 16 777 216 píxeles por imagen y 64 MiB de
+  contenido ZIP. Para un AnimatedSprite usa una imagen por cuadro.
+• Para migrar un proyecto antiguo: conserva una copia del proyecto, procesa
+  los PNG originales (sin recortar) con el HTML e importa el ZIP. Selecciona
+  el PNG nuevo en cada nodo o cuadro de animación y actualiza los bloques
+  Cambiar imagen que usaban el anterior. Si editaste manualmente el tamaño,
+  deja desmarcado Ajustar el nodo al tamaño de la imagen. No cambies X/Y ni
+  tamaño en los scripts: siguen referidos al lienzo original. En propiedades
+  y tiradores del editor se muestra la caja visible del recurso recortado.
+  Sin migrar, los PNG antiguos conservan su aspecto en juego, pero sus cajas
+  de edición vuelven a incluir el margen transparente original.
+
+EVENTOS
+[start] Al iniciar: corre una vez al entrar en la escena. En Autoload corre
+  una vez al iniciar el juego, antes de los scripts de la primera escena.
+[press] Al presionar: corre una vez al apoyar el dedo en el nodo. Úsalo para
+  una acción única, como abrir un menú.
+[hold] Al mantener presionado: repite su sección mientras el toque sigue
+  activo y ejecuta la sección al soltar una vez. Sirve para un control continuo.
+[recv] Recibir mensaje: se ejecuta al recibir el nombre indicado por
+  Transmitir mensaje. Es más eficiente que comprobar ese estado cada cuadro.
+[frame] Cada fotograma: vuelve a evaluar continuamente. Úsalo para seguir
+  una variable o comprobar condiciones que cambian durante el juego.
+[collision] Al colisionar: en un nodo Collision, se dispara al empezar a
+  solaparse con el objetivo que elegiste.
+[collisionExit] Al dejar de colisionar: reacciona cuando termina ese solapamiento.
+[collisionStay] Mientras colisiona: repite mientras dura el solapamiento;
+  no vuelve a iniciar el mismo cuerpo si el anterior aún está en ejecución.
+[every] Cada X segundos: repite a un intervalo; usa un valor mayor que cero.
+[change] Al cambiar una propiedad: vigila una propiedad de un nodo (X, texto,
+  visibilidad, etc.). No vigila variables de escena: para ellas usa un mensaje
+  o Cada fotograma si necesitas leerlas continuamente.
+[orient] Al cambiar de orientación: reacciona cuando cambia entre vertical
+  y horizontal; no reemplaza Al iniciar.
+[func] Función: define bloques reutilizables con nombre. No se ejecuta hasta
+  invocarla. `Avisar() → void` solo hace su trabajo; `Mover(distancia=30)`
+  admite un parámetro con valor por defecto. Si no das un argumento, usa su
+  valor por defecto (o 0 si no se declaró). Los valores se leen en el llamador.
+[vend] Al terminar el video: en un nodo Video, reacciona al llegar al final
+  sin bucle. En reversa el final es el segundo cero.
+
+LLAMADAS, CONDICIONES Y BUCLES
+[send] Transmitir mensaje: escribe el mismo nombre que en Recibir mensaje
+  y elige alcance (escena, nodo, jerarquía o global).
+[call] Invocar función: busca por nombre, primero en el nodo del script.
+  Marca Pasar argumentos si necesitas valores explícitos, en orden.
+[callNode] Invocar función de nodo: busca esa función solo en el nodo elegido.
+  En llamadas normales puedes Guardar resultado en una variable si la
+  función devuelve valor. La opción se oculta para void y en paralelo.
+  Las funciones antiguas conservan el modo Automático (compatibilidad) y
+  su variable especial `retorno`; para scripts nuevos, elige void o valor.
+[funcExists] Comprobar función de nodo: guarda true/false en una variable;
+  no llega a invocar la función.
+[return] Devolver valor: termina la función y entrega el valor de este bloque.
+  Si la función declara void, salir no entrega ningún valor.
+[exitFunction] Salir de la función: finaliza de inmediato sin entregar nada;
+  llegar al último bloque de una función void hace lo mismo sin añadir un bloque.
+[if] Si: ejecuta los bloques internos si la condición es verdadera.
+  Ejemplos: `firemn = true`, `colisiona("Área", "Jugador")`. Con una
+  condición temporal `por(X)`, «esperar» pausa este bloque hasta evaluarla;
+  «reloj propio» deja que el evento la vuelva a consultar sin bloquearlo.
+[elif] Sino, Si: prueba otra condición si los Si anteriores de la misma
+  cadena no se cumplieron. Colócalo debajo del Si, con la misma sangría.
+[else] Sino: último caso si toda la cadena anterior fue falsa. No lleva condición.
+[while] Repetir mientras: vuelve a probar la condición para decidir si sigue.
+[repeat] Repetir (veces): repite un número definido de veces.
+[forever] Repetir siempre: repite hasta interrumpirlo; usa Esperar para no
+  ejecutar acciones más rápido de lo necesario.
+[break] Romper: sale del bucle activo, no de todo el script.
+[breakrep] Romper el bloque Repetir (veces): sale específicamente de un
+  Repetir (veces) de esta función o evento.
+[breakloop] Romper loop: desactiva las vueltas de una animación o video.
+  No lo detiene en ese instante; para eso usa Detener.
+[wait] Esperar: suspende este script durante X segundos; el juego sigue activo.
+
+VARIABLES Y ESTADOS
+[var] Variable (crear): asigna nombre, tipo, valor inicial y alcance (global,
+  escena, nodo o local). Una variable local dentro de una función dura la llamada.
+[setvar] Cambiar valor de variable: modifica una variable ya creada.
+[math] Operar variable: aplica +, −, × o ÷ a un valor numérico.
+[enum] Enum (definir): da nombres a estados, por ejemplo Juego: Menu,Jugando,Pausa.
+[enumnext] Fase de Enum: elige una fase o avanza/retrocede; puedes volver
+  al comienzo al alcanzar el final.
+[match] Coincidir: toma un valor y elige una rama Caso, útil para varios estados.
+[case] Caso: dentro de Coincidir, ejecuta su rama si coincide un valor de la lista.
+[default] Por defecto: dentro de Coincidir, se usa si no coincide ningún Caso.
+[save] Guardar variables: elige qué variables persistir en el dispositivo.
+[clearsave] Borrar progreso guardado: elimina los datos persistentes; no
+  equivale a cambiar cada variable que ya está en memoria.
+
+ESCENA, OBJETOS Y DIBUJO
+[scene] Cambiar de escena: abre otra escena por nombre e inicia sus eventos.
+[orientset] Cambiar orientación: solicita vista vertical u horizontal.
+[viewmode] Usar viewport o cámara: elige la vista fija o Camera2D.
+[camset] Configurar cámara: elige la Camera2D y cambia zoom, seguimiento,
+  suavizado o activación. Es el zoom del juego, distinto del zoom del editor.
+[layer] Capa del nodo: modifica el orden de dibujo entre hermanos.
+[setimg] Cambiar imagen: asigna un recurso visual al nodo seleccionado.
+[mod] Modulate: cambia la opacidad entre 0 y 1; permite conservar toques con
+  alfa cero cuando se indica. Distinto de ocultar el nodo con Visibilidad.
+[vis] Visibilidad: muestra u oculta el nodo, sin eliminarlo.
+[stoprender] Dejar de renderizar: interrumpe el dibujo del nodo para ahorrar
+  recursos. Sigue siendo un nodo de la escena; no elimina su script.
+[startrender] Renderizar de nuevo: restaura el dibujo tras Dejar de renderizar.
+[pos] Mover a: fija X/Y; deja un eje vacío si quieres conservarlo.
+[advance] Avanzar píxeles: mueve una distancia relativa en una dirección;
+  el tiempo cero aplica el cambio de inmediato.
+[speed] Velocidad: mueve continuamente con velocidad inicial y final, con
+  tiempo, rampa o condición. Úsalo si importa la velocidad y no una meta exacta.
+[rotate] Rotar: suma grados o gira a un ángulo concreto, con tiempo opcional.
+[tween] Cambio progresivo: interpola posición, tamaño, opacidad o rotación
+  usando la duración y curva configuradas, sin detener el script actual.
+[clone] Clonar nodo: crea una copia de nodo con su script y sin hijos, activa
+  a partir del siguiente fotograma. No se conserva al cambiar de escena.
+[visualClone] Clonar visualización: solo copia lo dibujado. Con Compartir
+  cambios sigue al original; sin esa opción captura una pose fija.
+[clearVisualClones] Quitar copias visuales: elimina las copias dibujadas
+  del nodo elegido, no el nodo ni las copias de Clonar nodo.
+[collisionEnable] Activar o desactivar colisión: cambia si participa el nodo
+  Collision; no modifica su posición ni la visibilidad de otros nodos.
+[text] Cambiar texto: cambia el contenido de un Button o Label.
+[quit] Cerrar juego: termina la partida y sale del reproductor.
+
+SONIDO, ANIMACIÓN Y VIDEO
+[setsnd] Cambiar sonido: asigna otro recurso al nodo Sound; no lo reproduce.
+[play] Reproducir: inicia el recurso del nodo. En Video o AnimatedSprite
+  puedes invertir la dirección, reiniciar y configurar bucle. Reversa de
+  video es aproximada y sin audio.
+[stop] Detener: interrumpe sonido, animación o video. Usa Pausar video si
+  quieres conservar el punto de reproducción del video.
+[vpause] Pausar video: interrumpe la reproducción conservando el tiempo.
+[vseek] Ir a un segundo del video: salta al instante indicado sin cambiar
+  por sí solo si el video está reproduciéndose.
+[vvol] Volumen del video: ajusta el volumen entre 0 (silencio) y 1.
+[setvideo] Cambiar video: selecciona otro archivo para el mismo nodo Video.
