@@ -135,6 +135,11 @@ ESCENA, OBJETOS Y DIBUJO
 [rotate] Rotar: suma grados o gira a un ángulo concreto, con tiempo opcional.
 [tween] Cambio progresivo: interpola posición, tamaño, opacidad o rotación
   usando la duración y curva configuradas, sin detener el script actual.
+  Pulsa «＋ Al terminar» debajo del bloque para crear una sangría; agrega ahí
+  las acciones que se ejecutarán al completarse. Si otro cambio del mismo
+  tipo lo reemplaza, ese cambio cancelado no ejecuta sus acciones finales.
+  El script principal sigue sin esperar; la sangría se ejecuta con el mismo
+  «self» que el bloque original.
 [clone] Clonar nodo: crea una copia de nodo con su script y sin hijos, activa
   a partir del siguiente fotograma. No se conserva al cambiar de escena.
 [visualClone] Clonar visualización: solo copia lo dibujado. Con Compartir

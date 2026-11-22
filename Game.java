@@ -388,7 +388,8 @@ public class Game {
     }
 
     static class Tw {
-        Node n;
+        Node n, owner;
+        ArrayList<Blk> after;
         int kind;
         float[] from = new float[2], to = new float[2];
         boolean[] has = new boolean[2];
@@ -512,6 +513,7 @@ public class Game {
     HashMap<Blk, float[]> tclk = new HashMap<Blk, float[]>();
     HashMap<String, ArrayList<Object[]>> fnMap;
     ArrayList<Tw> tws = new ArrayList<Tw>();
+    final ArrayList<Tw> tweenAfter = new ArrayList<Tw>();
     ArrayList<Hold> holds = new ArrayList<Hold>();
     ArrayList<Task> tasks = new ArrayList<Task>();
     HashMap<String, Bitmap> cache = new HashMap<String, Bitmap>();
@@ -2340,6 +2342,8 @@ public class Game {
             case "tween": {
                 Tw w = new Tw();
                 w.n = t;
+                w.owner = self;
+                if (b.b("after") || !b.body.isEmpty()) w.after = b.body;
                 w.d = (float) num(val(b.s("secs"), self));
                 w.easing = b.s("ease");
                 String what = b.s("what");
@@ -2366,8 +2370,10 @@ public class Game {
                     if (tws.get(i).n == t && tws.get(i).kind == w.kind) tws.remove(i);
                 }
                 if (what.equals("modulate") && b.f.containsKey("touch")) t.touchAlways = b.b("touch");
-                if (w.d <= 0) applyTween(w, 1f);
-                else tws.add(w);
+                if (w.d <= 0) {
+                    applyTween(w, 1f);
+                    if (w.after != null && !w.after.isEmpty()) tweenAfter.add(w);
+                } else tws.add(w);
                 break;
             }
             default:
@@ -2835,6 +2841,7 @@ public class Game {
         grabs.clear();
         infRun.clear();
         tws.clear();
+        tweenAfter.clear();
         holds.clear();
         layerOps.clear();
         tasks.clear();
@@ -2905,7 +2912,7 @@ public class Game {
     public boolean active() {
         if (edit || hasPoll || hasCollisionEvents || hasVideo || !pendingClones.isEmpty()
                 || pendingScene != null || orientChanged || useCam) return true;
-        if (!tasks.isEmpty() || !tws.isEmpty() || !holds.isEmpty() || !msgs.isEmpty() || !grabs.isEmpty()) return true;
+        if (!tasks.isEmpty() || !tws.isEmpty() || !tweenAfter.isEmpty() || !holds.isEmpty() || !msgs.isEmpty() || !grabs.isEmpty()) return true;
         for (Node n : nodes) {
             if (n.playing && n.type.equals("AnimatedSprite") && !n.frames.isEmpty()) return true;
         }
@@ -2993,7 +3000,17 @@ public class Game {
             t.t += dt;
             float k = t.d <= 0 ? 1f : Math.min(1f, t.t / t.d);
             applyTween(t, k);
-            if (k >= 1f) tws.remove(i);
+            if (k >= 1f) {
+                tws.remove(i);
+                if (t.after != null && !t.after.isEmpty()) tweenAfter.add(t);
+            }
+        }
+        if (!tweenAfter.isEmpty()) {
+            ArrayList<Tw> finished = new ArrayList<Tw>(tweenAfter);
+            tweenAfter.clear();
+            for (Tw t : finished) {
+                if (t.after != null && !t.after.isEmpty()) spawn(t.after, t.owner);
+            }
         }
         for (int i = holds.size() - 1; i >= 0; i--) {
             Hold h = holds.get(i);

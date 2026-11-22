@@ -1900,7 +1900,8 @@ public class EditorActivity extends Activity {
         String t = b.t;
         return specOf(t)[2].equals("E") || t.equals("match") || t.equals("case") || t.equals("default")
                 || t.equals("if") || t.equals("elif") || t.equals("else")
-                || t.equals("while") || t.equals("repeat") || t.equals("forever");
+                || t.equals("while") || t.equals("repeat") || t.equals("forever")
+                || (t.equals("tween") && (b.b("after") || !b.body.isEmpty()));
     }
 
     static boolean control(String t) {
@@ -1931,6 +1932,7 @@ public class EditorActivity extends Activity {
             return "Variable  " + b.s("name") + " (" + b.s("vtype") + ", " + b.s("scope") + ") = " + b.s("val");
         }
         StringBuilder sb = new StringBuilder(sp[1]);
+        if (b.t.equals("tween") && (b.b("after") || !b.body.isEmpty())) sb.append(" · Al terminar");
         boolean first = true;
         for (int i = 3; i < sp.length; i++) {
             String v = b.s(sp[i].split(":", 4)[0]);
@@ -2034,15 +2036,25 @@ public class EditorActivity extends Activity {
             int color = ev ? 0x44FFAA00 : control(b.t) ? 0x3300AAFF : 0x22FFFFFF;
             box.addView(row(depth, (ev ? "▶ " : "") + describe(b), color, x -> blockMenu(list, idx, ref)));
             if (container(b)) {
-                if (b.t.equals("hold")) box.addView(row(depth + 1, "Si sigue presionado:", 0, null));
-                render(box, b.body, depth + 1, ref, false);
-                box.addView(row(depth + 1, b.t.equals("match") ? "＋ caso / por defecto" : "＋ bloque", 0,
-                        x -> pickBlock(b.body, false, ref, b.t.equals("match"))));
+                if (b.t.equals("tween")) {
+                    box.addView(row(depth + 1, "Al terminar:", 0, null));
+                    render(box, b.body, depth + 2, ref, false);
+                    box.addView(row(depth + 2, "＋ bloque", 0, x -> pickBlock(b.body, false, ref)));
+                    box.addView(row(depth + 1, "− Quitar Al terminar", 0,
+                            x -> { b.body.clear(); b.f.remove("after"); ref.run(); }));
+                } else {
+                    if (b.t.equals("hold")) box.addView(row(depth + 1, "Si sigue presionado:", 0, null));
+                    render(box, b.body, depth + 1, ref, false);
+                    box.addView(row(depth + 1, b.t.equals("match") ? "＋ caso / por defecto" : "＋ bloque", 0,
+                            x -> pickBlock(b.body, false, ref, b.t.equals("match"))));
+                }
                 if (b.t.equals("hold")) {
                     box.addView(row(depth + 1, "Si no (al soltar):", 0, null));
                     render(box, b.els, depth + 1, ref, false);
                     box.addView(row(depth + 1, "＋ bloque", 0, x -> pickBlock(b.els, false, ref)));
                 }
+            } else if (b.t.equals("tween")) {
+                box.addView(row(depth + 1, "＋ Al terminar", 0, x -> { b.f.put("after", "true"); ref.run(); }));
             }
         }
     }
