@@ -41,6 +41,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -173,7 +174,22 @@ public class EditorActivity extends Activity {
     String pid;
     File dir, adir, jf, iconFile;
     Game.Node sel, scriptOwner;
+    Button undoButton, redoButton;
+    HistoryState gestureBefore, pendingFieldBefore;
+    EditText pendingHistoryField;
+    final ArrayList<HistoryState> undoHistory = new ArrayList<HistoryState>();
+    final ArrayList<HistoryState> redoHistory = new ArrayList<HistoryState>();
+    static final int MAX_HISTORY = 24;
+    static final int MAX_HISTORY_CHARS = 4 * 1024 * 1024;
     static final int IMPORT_FONT = 4, IMPORT_ORDERS = 5;
+
+    static final class HistoryState {
+        final String json;
+        final int sceneId, selectedId;
+        HistoryState(String json, int sceneId, int selectedId) {
+            this.json = json; this.sceneId = sceneId; this.selectedId = selectedId;
+        }
+    }
     boolean importingOrders;
     int fontNodeId = -1;
     LinearLayout list, props;
@@ -246,6 +262,129 @@ public class EditorActivity extends Activity {
         });
         p.addView(e);
         return e;
+    }
+
+    EditText historyField(LinearLayout p, String lab, String val, int type, Str cb) {
+        EditText e = field(p, lab, val, type, cb);
+        e.setOnFocusChangeListener((view, focused) -> {
+            if (focused) {
+                pendingHistoryField = e;
+                pendingFieldBefore = captureHistory();
+                // Permite tocar Deshacer aunque el primer cambio siga en el campo activo.
+                if (undoButton != null) undoButton.setEnabled(true);
+            } else if (pendingHistoryField == e) {
+                HistoryState old = pendingFieldBefore;
+                pendingHistoryField = null;
+                pendingFieldBefore = null;
+                if (old != null) recordHistory(old);
+            }
+        });
+        return e;
+    }
+
+    HistoryState captureHistory() {
+        if (g == null) return null;
+        try {
+            return new HistoryState(g.toJson(), g.curScene == null ? g.startId : g.curScene.id,
+                    sel == null ? -1 : sel.id);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    void recordHistory(HistoryState before) {
+        if (before == null) {
+            updateHistoryButtons();
+            return;
+        }
+        HistoryState after = captureHistory();
+        if (after == null || before.json.equals(after.json)) {
+            updateHistoryButtons();
+            return;
+        }
+        undoHistory.add(before);
+        redoHistory.clear();
+        trimHistory();
+    }
+
+    void finishHistoryField() {
+        HistoryState before = pendingFieldBefore;
+        EditText field = pendingHistoryField;
+        pendingFieldBefore = null;
+        pendingHistoryField = null;
+        if (field != null && field.isFocused()) field.clearFocus();
+        if (before != null) recordHistory(before);
+    }
+
+    void undoEdit() {
+        finishHistoryField();
+        if (undoHistory.isEmpty()) return;
+        HistoryState current = captureHistory();
+        HistoryState previous = undoHistory.remove(undoHistory.size() - 1);
+        if (current != null) {
+            redoHistory.add(current);
+        }
+        restoreHistory(previous);
+        trimHistory();
+    }
+
+    void redoEdit() {
+        finishHistoryField();
+        if (redoHistory.isEmpty()) return;
+        HistoryState current = captureHistory();
+        HistoryState next = redoHistory.remove(redoHistory.size() - 1);
+        if (current != null) {
+            undoHistory.add(current);
+        }
+        restoreHistory(next);
+        trimHistory();
+    }
+
+    void trimHistory() {
+        int chars = 0;
+        for (HistoryState state : undoHistory) chars += state.json.length();
+        for (HistoryState state : redoHistory) chars += state.json.length();
+        while (undoHistory.size() + redoHistory.size() > MAX_HISTORY || chars > MAX_HISTORY_CHARS) {
+            ArrayList<HistoryState> oldest = !undoHistory.isEmpty() ? undoHistory : redoHistory;
+            if (oldest.isEmpty()) break;
+            chars -= oldest.remove(0).json.length();
+        }
+        updateHistoryButtons();
+    }
+
+    void restoreHistory(HistoryState state) {
+        if (state == null || g == null) return;
+        try {
+            Game old = g;
+            Game restored = Game.fromJson(state.json, old.src, false);
+            restored.edit = true;
+            restored.editorZoom = old.editorZoom;
+            restored.editorPanX = old.editorPanX;
+            restored.editorPanY = old.editorPanY;
+            restored.editMode = old.editMode;
+            Game.Scene scene = restored.sceneById(state.sceneId);
+            restored.openScene(scene == null ? restored.sceneById(restored.startId) : scene);
+            restored.sel = state.selectedId < 0 ? null : restored.byId(state.selectedId);
+            g = restored;
+            sel = restored.sel;
+            scriptOwner = null;
+            pv.g = restored;
+            pv.edit = true;
+            pv.last = 0;
+            pv.wasActive = true;
+            updateSceneLabel();
+            rebuildList();
+            rebuildProps();
+            save();
+            pv.invalidate();
+        } catch (Exception e) {
+            toast("No pude restaurar el cambio: " + e.getMessage());
+        }
+    }
+
+    void updateHistoryButtons() {
+        if (undoButton != null) undoButton.setEnabled(!undoHistory.isEmpty());
+        if (redoButton != null) redoButton.setEnabled(!redoHistory.isEmpty());
     }
 
     CheckBox check(LinearLayout p, String lab, boolean v, final Str cb) {
@@ -351,8 +490,18 @@ public class EditorActivity extends Activity {
                 select(n);
             }
 
+            public void beginEdit(Game.Node n) {
+                if (gestureBefore == null) gestureBefore = captureHistory();
+            }
+
             public void moved(Game.Node n) {
                 rebuildProps();
+            }
+
+            public void endEdit(Game.Node n) {
+                HistoryState before = gestureBefore;
+                gestureBefore = null;
+                recordHistory(before);
             }
         };
         root.addView(pv, new LinearLayout.LayoutParams(MP, dp(230)));
@@ -375,6 +524,11 @@ public class EditorActivity extends Activity {
         LinearLayout bar = new LinearLayout(this);
         hs.addView(bar);
         bar.addView(btn("＋ Nodo", x -> addNode()));
+        undoButton = btn("↶ Deshacer", x -> undoEdit());
+        redoButton = btn("↷ Rehacer", x -> redoEdit());
+        bar.addView(undoButton);
+        bar.addView(redoButton);
+        updateHistoryButtons();
         bar.addView(btn("Escenas", x -> scenesDialog()));
         bar.addView(btn("Autoload", x -> openScript(g.autoload)));
         final String[] tools = {"Movimiento", "Tamaño", "Rotación"};
@@ -513,9 +667,11 @@ public class EditorActivity extends Activity {
     void addNode() {
         new AlertDialog.Builder(this).setTitle("Agregar nodo")
                 .setItems(Game.TYPES, (d, i) -> {
+                    HistoryState before = captureHistory();
                     Game.Node n = g.add(Game.TYPES[i]);
                     sel = null;
                     select(n);
+                    recordHistory(before);
                 }).show();
     }
 
@@ -547,6 +703,7 @@ public class EditorActivity extends Activity {
 
     // ================= Propiedades =================
     void rebuildProps() {
+        finishHistoryField();
         props.removeAllViews();
         final Game.Node n = sel;
         if (n == null) {
@@ -655,16 +812,16 @@ public class EditorActivity extends Activity {
         RectF shown = new RectF();
         g.editBounds(n, n.x, n.y, shown);
         if (showGeo && !shown.isEmpty()) {
-            field(props, "Posición X", trimf(shown.left), NUM, s -> g.setEditPosition(n, true, pf(s, Float.NaN)));
-            field(props, "Posición Y", trimf(shown.top), NUM, s -> g.setEditPosition(n, false, pf(s, Float.NaN)));
+            historyField(props, "Posición X", trimf(shown.left), NUM, s -> g.setEditPosition(n, true, pf(s, Float.NaN)));
+            historyField(props, "Posición Y", trimf(shown.top), NUM, s -> g.setEditPosition(n, false, pf(s, Float.NaN)));
             if (!n.type.equals("Sound")) {
-                field(props, "Ancho", trimf(shown.width()), NUM, s -> {
+                historyField(props, "Ancho", trimf(shown.width()), NUM, s -> {
                     float value = pf(s, Float.NaN);
                     if (!Float.isFinite(value)) return;
                     g.setEditSize(n, true, value);
                     if (fitBox[0] != null && fitBox[0].isChecked()) fitBox[0].setChecked(false);
                 });
-                field(props, "Alto", trimf(shown.height()), NUM, s -> {
+                historyField(props, "Alto", trimf(shown.height()), NUM, s -> {
                     float value = pf(s, Float.NaN);
                     if (!Float.isFinite(value)) return;
                     g.setEditSize(n, false, value);
@@ -674,7 +831,7 @@ public class EditorActivity extends Activity {
         }
 
         if (!n.type.equals("Sound") && !n.type.equals("Camera2D") && !n.type.equals("Anchor")) {
-            field(props, "Rotación (grados, positivo = horario)", trimf(n.rot), NUM, s -> n.rot = pf(s, n.rot));
+            historyField(props, "Rotación (grados, positivo = horario)", trimf(n.rot), NUM, s -> n.rot = pf(s, n.rot));
             nodePicker("Ancla de rotación (nodo Anchor; vacío = centro del nodo)", "Anchor", n.anchor, s -> n.anchor = s);
         }
 
@@ -682,7 +839,7 @@ public class EditorActivity extends Activity {
         if (n.type.equals("Image") || n.type.equals("ImageButton")) {
             props.addView(label("Recurso: " + (n.res.isEmpty() ? "(ninguno)" : n.res)));
             check(props, "Toque inteligente (solo donde se dibuja la imagen, ignora transparencias)", n.smart, s -> n.smart = s.equals("true"));
-            field(props, "Precisión del toque (8 a 256, menor = más rápido)", trimf(n.smartRes), NUM,
+            field(props, "Resolución de la vista previa de la máscara (8 a 256)", trimf(n.smartRes), NUM,
                     s -> n.smartRes = Math.max(8, Math.min(256, (int) pf(s, n.smartRes))));
             if (n.type.equals("ImageButton")) {
                 check(props, "Oscurecer al tocar", n.dim, s -> n.dim = s.equals("true"));
@@ -866,11 +1023,13 @@ public class EditorActivity extends Activity {
                 .setTitle("¿Eliminar " + n.name + "?")
                 .setMessage("También se eliminan sus hijos.")
                 .setPositiveButton("Eliminar", (d, w) -> {
+                    HistoryState before = captureHistory();
                     g.remove(n);
                     sel = null;
                     g.sel = null;
                     rebuildList();
                     rebuildProps();
+                    recordHistory(before);
                 }).setNegativeButton("Cancelar", null).show()));
     }
 
@@ -1030,20 +1189,43 @@ public class EditorActivity extends Activity {
     }
 
     String[] assets(boolean image) {
+        ArrayList<String> all = new ArrayList<String>();
+        all.addAll(Arrays.asList(assets(image, false)));
+        all.addAll(Arrays.asList(assets(image, true)));
+        Collections.sort(all);
+        return all.toArray(new String[0]);
+    }
+
+    String[] assets(boolean image, boolean special) {
         ArrayList<String> l = new ArrayList<String>();
         File[] fs = adir.listFiles();
-        if (fs != null) for (File f : fs) if (image ? isImg(f.getName()) : isSnd(f.getName())) l.add(f.getName());
+        if (fs != null) for (File f : fs) {
+            if (!f.isFile()) continue;
+            boolean isSpecial = g.assetOrders.containsKey(f.getName());
+            if (isSpecial == special && (image ? isImg(f.getName()) : isSnd(f.getName()))) l.add(f.getName());
+        }
         Collections.sort(l);
         return l.toArray(new String[0]);
     }
 
     void chooseAsset(boolean image, final Pick cb) {
-        final String[] names = assets(image);
-        AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle(image ? "Elegir imagen" : "Elegir sonido");
-        if (names.length == 0) b.setMessage("No hay assets de este tipo. Usa Importar.");
-        else b.setItems(names, (d, i) -> cb.got(names[i]));
-        b.setNeutralButton("Importar…", (d, i) -> startImport());
-        b.setNegativeButton("Cancelar", null).show();
+        final String type = image ? "imagen" : "sonido";
+        String[] sections = {"Assets comunes (importación manual)", "Assets especiales (ZIP de recorte)"};
+        new AlertDialog.Builder(this).setTitle("Elegir " + type + " · selecciona una sección")
+                .setItems(sections, (d, which) -> {
+                    boolean special = which == 1;
+                    String[] names = assets(image, special);
+                    if (names.length == 0) {
+                        toast("No hay " + (image ? "imágenes" : "sonidos") + " en esta sección");
+                        return;
+                    }
+                    new AlertDialog.Builder(this).setTitle(special ? "Assets especiales" : "Assets comunes")
+                            .setItems(names, (d2, index) -> cb.got(names[index]))
+                            .setNegativeButton("Volver", (d2, w) -> chooseAsset(image, cb)).show();
+                })
+                .setNeutralButton("Importar archivos comunes…", (d, w) -> startImport())
+                .setPositiveButton("Importar ZIP especial…", (d, w) -> startOrdersImport())
+                .setNegativeButton("Cancelar", null).show();
     }
 
     static boolean isFont(String name) {
@@ -1091,40 +1273,72 @@ public class EditorActivity extends Activity {
         pv.invalidate();
     }
 
+    String[] assetNames(boolean special) {
+        ArrayList<String> names = new ArrayList<String>();
+        File[] files = adir.listFiles();
+        if (files != null) for (File f : files) {
+            if (f.isFile() && g.assetOrders.containsKey(f.getName()) == special) names.add(f.getName());
+        }
+        Collections.sort(names);
+        return names.toArray(new String[0]);
+    }
+
     void assetsDialog() {
         if (importingOrders) {
             toast("Espera a que termine la importación de órdenes");
             return;
         }
-        final ArrayList<String> all = new ArrayList<String>();
-        File[] fs = adir.listFiles();
-        if (fs != null) for (File f : fs) all.add(f.getName());
-        Collections.sort(all);
-        AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle("Assets del proyecto");
-        if (all.isEmpty()) {
-            b.setMessage("Aún no hay assets. Importa imágenes, sonidos, videos y fuentes (.ttf, .otf).");
+        String[] sections = {
+                "Assets comunes · importación manual (" + assetNames(false).length + ")",
+                "Assets especiales · ZIP de recorte (" + assetNames(true).length + ")"
+        };
+        new AlertDialog.Builder(this).setTitle("Assets del proyecto")
+                .setItems(sections, (d, which) -> showAssetSection(which == 1))
+                .setNeutralButton("Importar archivos comunes…", (d, w) -> startImport())
+                .setPositiveButton("Importar ZIP especial…", (d, w) -> startOrdersImport())
+                .setNegativeButton("Cerrar", null).show();
+    }
+
+    void showAssetSection(final boolean special) {
+        final String[] names = assetNames(special);
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+                .setTitle(special ? "Assets especiales · PNG con coordenadas" : "Assets comunes · importación manual");
+        if (names.length == 0) {
+            b.setMessage(special ? "No hay assets especiales. Importa el ZIP generado por trim-assets.html."
+                    : "No hay assets comunes. Importa imágenes, audio, video o fuentes manualmente.");
         } else {
-            b.setItems(all.toArray(new String[0]), (d, i) -> {
-                final String nm = all.get(i);
-                new AlertDialog.Builder(this).setTitle("¿Eliminar " + nm + "?")
+            b.setItems(names, (d, i) -> {
+                String name = names[i];
+                Game.AssetOrder order = g.assetOrders.get(name);
+                String detail = order == null ? name : name + " · recorte " + order.x + "," + order.y + " "
+                        + order.width + "×" + order.height + " / original " + order.sourceWidth + "×" + order.sourceHeight;
+                new AlertDialog.Builder(this).setTitle("¿Eliminar " + detail + "?")
                         .setPositiveButton("Eliminar", (d2, w) -> {
-                            if (new File(adir, nm).delete()) {
-                                g.assetOrders.remove(nm);
+                            if (new File(adir, name).delete()) {
+                                g.assetOrders.remove(name);
                                 save();
                                 g.flush();
                                 pv.invalidate();
-                            }
+                                showAssetSection(special);
+                            } else toast("No pude eliminar " + name);
                         }).setNegativeButton("Cancelar", null).show();
             });
         }
-        b.setNeutralButton("Importar…", (d, i) -> startImport());
-        b.setPositiveButton("Importar órdenes", (d, i) -> {
-            Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            pick.addCategory(Intent.CATEGORY_OPENABLE);
-            pick.setType("*/*");
-            startActivityForResult(pick, IMPORT_ORDERS);
-        });
+        b.setPositiveButton(special ? "Importar otro ZIP…" : "Importar archivos…",
+                (d, w) -> { if (special) startOrdersImport(); else startImport(); });
+        b.setNeutralButton("Volver", (d, w) -> assetsDialog());
         b.setNegativeButton("Cerrar", null).show();
+    }
+
+    void startOrdersImport() {
+        if (importingOrders) {
+            toast("Espera a que termine la importación actual");
+            return;
+        }
+        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        pick.setType("*/*");
+        startActivityForResult(pick, IMPORT_ORDERS);
     }
 
     String nameOf(Uri u) {
@@ -1771,7 +1985,14 @@ public class EditorActivity extends Activity {
         }
 
         void upd() {
-            info.setText("X: " + Math.round(gx) + "    Y: " + Math.round(gy));
+            String coords = "Lienzo completo · X: " + Math.round(gx) + "    Y: " + Math.round(gy);
+            if (imageOrder != null) {
+                coords += "\nCaja visible · X: " + Math.round(gx + gw * imageOrder.left)
+                        + "    Y: " + Math.round(gy + gh * imageOrder.top)
+                        + "    " + Math.round(gw * (imageOrder.right - imageOrder.left))
+                        + "×" + Math.round(gh * (imageOrder.bottom - imageOrder.top));
+            }
+            info.setText(coords);
         }
 
         @Override
@@ -1830,8 +2051,10 @@ public class EditorActivity extends Activity {
         LinearLayout root = vbox();
         root.setBackgroundColor(0xFF121212);
         TextView head = new TextView(this);
-        head.setText(fromGame ? "Última partida: arrastra el recuadro a su lugar"
-                : "Escena del editor (aún no hay partida guardada): arrastra el recuadro");
+        String pickerTitle = fromGame ? "Última partida: arrastra el recuadro a su lugar"
+                : "Escena del editor (aún no hay partida guardada): arrastra el recuadro";
+        if (imageOrder != null) pickerTitle += "\nEn un asset recortado, el recuadro es el lienzo original; la imagen se muestra en su desplazamiento.";
+        head.setText(pickerTitle);
         head.setPadding(dp(12), dp(16), dp(12), dp(8));
         root.addView(head);
         final TextView info = new TextView(this);
@@ -1901,7 +2124,7 @@ public class EditorActivity extends Activity {
         return specOf(t)[2].equals("E") || t.equals("match") || t.equals("case") || t.equals("default")
                 || t.equals("if") || t.equals("elif") || t.equals("else")
                 || t.equals("while") || t.equals("repeat") || t.equals("forever")
-                || (t.equals("tween") && (b.b("after") || !b.body.isEmpty()));
+                || ((t.equals("tween") || t.equals("play")) && (b.b("after") || !b.body.isEmpty()));
     }
 
     static boolean control(String t) {
@@ -1932,7 +2155,7 @@ public class EditorActivity extends Activity {
             return "Variable  " + b.s("name") + " (" + b.s("vtype") + ", " + b.s("scope") + ") = " + b.s("val");
         }
         StringBuilder sb = new StringBuilder(sp[1]);
-        if (b.t.equals("tween") && (b.b("after") || !b.body.isEmpty())) sb.append(" · Al terminar");
+        if ((b.t.equals("tween") || b.t.equals("play")) && (b.b("after") || !b.body.isEmpty())) sb.append(" · Al terminar");
         boolean first = true;
         for (int i = 3; i < sp.length; i++) {
             String v = b.s(sp[i].split(":", 4)[0]);
@@ -2036,7 +2259,7 @@ public class EditorActivity extends Activity {
             int color = ev ? 0x44FFAA00 : control(b.t) ? 0x3300AAFF : 0x22FFFFFF;
             box.addView(row(depth, (ev ? "▶ " : "") + describe(b), color, x -> blockMenu(list, idx, ref)));
             if (container(b)) {
-                if (b.t.equals("tween")) {
+                if (b.t.equals("tween") || b.t.equals("play")) {
                     box.addView(row(depth + 1, "Al terminar:", 0, null));
                     render(box, b.body, depth + 2, ref, false);
                     box.addView(row(depth + 2, "＋ bloque", 0, x -> pickBlock(b.body, false, ref)));
@@ -2053,7 +2276,7 @@ public class EditorActivity extends Activity {
                     render(box, b.els, depth + 1, ref, false);
                     box.addView(row(depth + 1, "＋ bloque", 0, x -> pickBlock(b.els, false, ref)));
                 }
-            } else if (b.t.equals("tween")) {
+            } else if (b.t.equals("tween") || b.t.equals("play")) {
                 box.addView(row(depth + 1, "＋ Al terminar", 0, x -> { b.f.put("after", "true"); ref.run(); }));
             }
         }
@@ -2270,6 +2493,15 @@ public class EditorActivity extends Activity {
                 holder = new String[]{cur};
                 w = listEditor(holder, kind.equals("L"));
                 v.addView(w);
+            } else if (kind.equals("I") || kind.equals("A")) {
+                final TextView chosen = label(cur.isEmpty() ? "(ninguno)" : cur);
+                chosen.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                LinearLayout assetRow = new LinearLayout(this);
+                assetRow.addView(chosen, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                assetRow.addView(btn("Elegir…", x -> chooseAsset(kind.equals("I"), chosen::setText)));
+                assetRow.addView(btn("Quitar", x -> chosen.setText("(ninguno)")));
+                w = chosen;
+                v.addView(assetRow);
             } else if (kind.equals("T") || kind.equals("N") || kind.equals("V") || kind.equals("R")
                     || kind.equals("Q") || kind.equals("M") || kind.equals("F")) {
                 final EditText e = new EditText(this);
@@ -2328,7 +2560,8 @@ public class EditorActivity extends Activity {
                     + "con el desplazamiento indicado; si no, conserva la apariencia y posición del momento."));
         }
         if (b.t.equals("play")) {
-            v.addView(label("El video en reversa no reproduce audio. Su fluidez depende del formato y del dispositivo."));
+            v.addView(label("Al terminar se ejecuta la sangría cuando acabe el audio, video o animación. "
+                    + "No se ejecuta mientras el recurso esté en bucle; el video en reversa no reproduce audio."));
         }
         if (b.t.equals("clone")) {
             v.addView(label("La copia aparece en el siguiente fotograma con los mismos ajustes, bloques y padre, "
@@ -2396,6 +2629,9 @@ public class EditorActivity extends Activity {
                             if (kind.equals("N")) val = normNum(val);
                         } else if (w instanceof CheckBox) {
                             val = ((CheckBox) w).isChecked() ? "true" : "false";
+                        } else if (w instanceof TextView) {
+                            val = ((TextView) w).getText().toString();
+                            if (val.equals("(ninguno)")) val = "";
                         } else {
                             Spinner s = (Spinner) w;
                             val = String.valueOf(s.getSelectedItem());

@@ -1,4 +1,4 @@
-MOTOR v13 — GUÍA DE EVENTOS Y BLOQUES
+MOTOR v14 — GUÍA DE EVENTOS Y BLOQUES
 ====================================
 
 EMPEZAR
@@ -13,15 +13,20 @@ la variable cada fotograma si solo reaccionas a estos dos cambios.
 
 EDICIÓN, ZOOM Y ASSETS
 • + y − modifican solo la vista del editor; Centrar restaura el 100%.
-  Arrastra espacio vacío para desplazar la vista. El borde marca el área del
-  viewport: verás los nodos que quedan fuera, pero el juego los sigue recortando.
-  Los nodos marcados como invisibles no se vuelven visibles al cambiar el zoom.
-• Abre trim-assets.html en un navegador y selecciona las imágenes. Descarga
-  ordenes-assets.zip y en Motor toca Assets → Importar órdenes. Luego elige
-  el recurso importado en Image, ImageButton o AnimatedSprite. El PNG ya se
-  guarda sin márgenes; la orden guarda el desplazamiento y tamaño original.
-  Los assets existentes no se sobrescriben: si el nombre ya existe, el
-  editor añade un prefijo numérico. Importar no reasigna ningún nodo.
+  Arrastra espacio vacío para desplazar la vista. Los nodos que quedan fuera
+  del viewport se siguen viendo en el editor, pero el juego los recorta.
+  No hay un trazo extra alrededor del viewport. Los nodos invisibles siguen
+  ocultos aunque cambies el zoom.
+• El menú Assets separa Assets comunes (archivos importados manualmente) de
+  Assets especiales (PNG recortados con órdenes). Para recortar, abre
+  trim-assets.html, selecciona las imágenes y descarga ordenes-assets.zip;
+  luego toca Assets → Importar ZIP especial. Los PNG quedan en la sección
+  Assets especiales. Asigna cada recurso nuevo a Image, ImageButton o
+  AnimatedSprite. El ZIP conserva el
+  desplazamiento y tamaño del lienzo original; el motor escala ese recorte
+  dentro de la caja completa del nodo. Los archivos no se sobrescriben: si
+  un nombre ya existe, se añade un prefijo numérico. Importar no reasigna
+  ningún nodo automáticamente.
 • El HTML omite imágenes totalmente transparentes. Admite hasta 256 archivos
   por lote, 8192 píxeles por lado, 16 777 216 píxeles por imagen y 64 MiB de
   contenido ZIP. Para un AnimatedSprite usa una imagen por cuadro.
@@ -32,8 +37,16 @@ EDICIÓN, ZOOM Y ASSETS
   deja desmarcado Ajustar el nodo al tamaño de la imagen. No cambies X/Y ni
   tamaño en los scripts: siguen referidos al lienzo original. En propiedades
   y tiradores del editor se muestra la caja visible del recurso recortado.
-  Sin migrar, los PNG antiguos conservan su aspecto en juego, pero sus cajas
-  de edición vuelven a incluir el margen transparente original.
+  Con Toque inteligente activado o usando un PNG especial, las zonas con
+  alfa exactamente cero no reciben toques; el alfa del recurso se evalúa
+  aparte de la opacidad del nodo. Los PNG comunes sin Toque inteligente y
+  los PNG antiguos sin orden conservan su caja rectangular completa.
+
+HISTORIAL DE EDICIÓN
+• ↶ Deshacer y ↷ Rehacer guardan los últimos cambios de propiedades visuales.
+  Registran arrastre, rotación, cambio de tamaño (también con los campos X/Y,
+  ancho y alto), creación y eliminación de nodos. El historial es temporal:
+  se borra al cerrar el editor y queda limitado para cuidar la memoria.
 
 EVENTOS
 [start] Al iniciar: corre una vez al entrar en la escena. En Autoload corre
@@ -154,8 +167,11 @@ ESCENA, OBJETOS Y DIBUJO
 SONIDO, ANIMACIÓN Y VIDEO
 [setsnd] Cambiar sonido: asigna otro recurso al nodo Sound; no lo reproduce.
 [play] Reproducir: inicia el recurso del nodo. En Video o AnimatedSprite
-  puedes invertir la dirección, reiniciar y configurar bucle. Reversa de
-  video es aproximada y sin audio.
+  puedes invertir la dirección, reiniciar y configurar bucle. «＋ Al terminar»
+  crea una sección anidada que corre una sola vez al finalizar un audio,
+  animación o video sin bucle, con el mismo «self». Si se repite en bucle no
+  finaliza; al detener o reemplazar la reproducción se cancela esa sección.
+  Reversa de video es aproximada y sin audio.
 [stop] Detener: interrumpe sonido, animación o video. Usa Pausar video si
   quieres conservar el punto de reproducción del video.
 [vpause] Pausar video: interrumpe la reproducción conservando el tiempo.

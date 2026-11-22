@@ -15,8 +15,10 @@ import java.util.HashMap;
 // No consume toques: pasan al GameView que está debajo.
 public class VideoLayer extends FrameLayout implements Game.Layer {
     static class H {
+        Game game;
         Game.Node n;
         TextureView tv;
+        volatile int playToken;
         MediaPlayer mp;
         Surface sf;
         String res = "";
@@ -51,7 +53,7 @@ public class VideoLayer extends FrameLayout implements Game.Layer {
             if (!n.type.equals("Video")) continue;
             H h = map.get(n);
             if (h == null) {
-                h = make(n);
+                h = make(n, g);
                 map.put(n, h);
                 h.res = n.res;
                 h.wantPlay = n.autoplay;
@@ -63,8 +65,9 @@ public class VideoLayer extends FrameLayout implements Game.Layer {
         }
     }
 
-    H make(Game.Node n) {
+    H make(Game.Node n, Game g) {
         final H h = new H();
+        h.game = g;
         h.n = n;
         h.tv = new TextureView(getContext());
         h.tv.setOpaque(false);
@@ -122,12 +125,7 @@ public class VideoLayer extends FrameLayout implements Game.Layer {
                 flushSeek(h);
                 tryStart(h);
             });
-            mp.setOnCompletionListener(p -> {
-                if (p == h.mp && !h.n.loop && !h.backwards) {
-                    h.wantPlay = false;
-                    h.n.vdone = true;
-                }
-            });
+            watchCompletion(h);
             mp.setOnErrorListener((p, what, extra) -> {
                 // Formato no soportado en este equipo
                 if (p == h.mp) closePlayer(h);
@@ -137,6 +135,19 @@ public class VideoLayer extends FrameLayout implements Game.Layer {
         } catch (Exception e) {
             closePlayer(h);
         }
+    }
+
+    void watchCompletion(final H h) {
+        final MediaPlayer player = h.mp;
+        final int token = h.playToken;
+        if (player == null) return;
+        player.setOnCompletionListener(p -> {
+            if (p == player && player == h.mp && token == h.playToken
+                    && !h.n.loop && !h.backwards) {
+                h.wantPlay = false;
+                h.game.videoEnded(h.n, token);
+            }
+        });
     }
 
     void tryStart(H h) {
@@ -192,7 +203,7 @@ public class VideoLayer extends FrameLayout implements Game.Layer {
         if (h.reverseMs <= 0f) {
             if (!h.n.loop) {
                 h.wantPlay = false;
-                h.n.vdone = true;
+                h.game.videoEnded(h.n, h.playToken);
                 return;
             }
             h.nextSeek = -2;
@@ -209,12 +220,15 @@ public class VideoLayer extends FrameLayout implements Game.Layer {
         n.vcmd = "";
         if (!n.res.equals(h.res) || cmd.equals("reload")) {
             h.res = n.res;
+            h.playToken = n.playToken;
             h.wantPlay = n.autoplay;
             h.backwards = false;
             open(h, g);
         }
         switch (cmd) {
             case "play": case "restart": {
+                h.playToken = n.playToken;
+                watchCompletion(h);
                 boolean changed = h.backwards != n.backwards;
                 h.backwards = n.backwards;
                 h.wantPlay = true;
