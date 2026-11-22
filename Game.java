@@ -27,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class Game {
     public interface Src {
@@ -44,6 +45,9 @@ public class Game {
         void setOrientation(boolean landscape);
 
         default void quit() {
+        }
+
+        default void wake() {
         }
     }
 
@@ -145,7 +149,7 @@ public class Game {
         public boolean inherit = true, visible = true, loop, autoplay, fit = true, fixed;
         public boolean current, lim, dim = true, swiped;
         public int swPid = -1, tch = -1;
-        public boolean touchAlways, smart, smartMaj, bold, italic, shadow, wrap = true, vdone;
+        public boolean touchAlways, smart, smartMaj, bold, italic, shadow, wrap = true;
         public int smartRes = 32, align = 1, valign = 1, color = 0xFFFFFFFF, ocolor = 0xFF000000;
         public float outline = 0f, vol = 1f, vseek = -1f;
         public String font = "", vcmd = "";
@@ -160,6 +164,9 @@ public class Game {
         // tiempo de ejecución
         public float wx, wy, wa;
         public boolean wvis, playing, preview, pressed, backwards;
+        volatile int playToken;
+        volatile ArrayList<Blk> playAfter;
+        volatile Node playOwner;
         ArrayList<VisualCopy> visualCopies;
         boolean literalText;
         public int pid = -1, frame;
@@ -387,6 +394,23 @@ public class Game {
         boolean[] b;
     }
 
+    static class VideoDone {
+        final Node node;
+        final int token;
+        VideoDone(Node node, int token) {
+            this.node = node; this.token = token;
+        }
+    }
+
+    static class PlayDone {
+        final Node node, owner;
+        final int token;
+        final ArrayList<Blk> body;
+        PlayDone(Node node, Node owner, int token, ArrayList<Blk> body) {
+            this.node = node; this.owner = owner; this.token = token; this.body = body;
+        }
+    }
+
     static class Tw {
         Node n, owner;
         ArrayList<Blk> after;
@@ -514,6 +538,8 @@ public class Game {
     HashMap<String, ArrayList<Object[]>> fnMap;
     ArrayList<Tw> tws = new ArrayList<Tw>();
     final ArrayList<Tw> tweenAfter = new ArrayList<Tw>();
+    final ConcurrentLinkedQueue<PlayDone> playDone = new ConcurrentLinkedQueue<PlayDone>();
+    final ConcurrentLinkedQueue<VideoDone> videoDone = new ConcurrentLinkedQueue<VideoDone>();
     ArrayList<Hold> holds = new ArrayList<Hold>();
     ArrayList<Task> tasks = new ArrayList<Task>();
     HashMap<String, Bitmap> cache = new HashMap<String, Bitmap>();
@@ -1039,6 +1065,7 @@ public class Game {
         ArrayList<Node> del = new ArrayList<Node>();
         for (Node q : nodes) if (isDesc(n, q)) del.add(q);
         for (Node q : del) {
+            cancelPlaybackAfter(q);
             if (q.mp != null) {
                 try {
                     q.mp.release();
@@ -1463,8 +1490,68 @@ public class Game {
         return b;
     }
 
+    void setPlaybackAfter(Node n, ArrayList<Blk> body, Node owner) {
+        n.playToken++;
+        n.playAfter = body == null || body.isEmpty() ? null : body;
+        n.playOwner = n.playAfter == null ? null : owner;
+    }
+
+    void cancelPlaybackAfter(Node n) {
+        if (n == null) return;
+        n.playToken++;
+        n.playAfter = null;
+        n.playOwner = null;
+    }
+
+    void queuePlaybackAfter(Node n, int token) {
+        if (n == null || n.playToken != token) return;
+        ArrayList<Blk> body = n.playAfter;
+        if (body == null || body.isEmpty()) return;
+        playDone.add(new PlayDone(n, n.playOwner, token, body));
+        if (host != null) host.wake();
+    }
+
+    void drainPlaybackAfter() {
+        PlayDone done;
+        while ((done = playDone.poll()) != null) {
+            if (done.node.playToken != done.token || done.node.playAfter != done.body
+                    || !nodes.contains(done.node)) continue;
+            done.node.playAfter = null;
+            done.node.playOwner = null;
+            spawn(done.body, done.owner);
+        }
+    }
+
+    void videoEnded(Node n, int token) {
+        if (n == null || n.playToken != token) return;
+        videoDone.add(new VideoDone(n, token));
+        if (host != null) host.wake();
+    }
+
+    void drainVideoDone() {
+        VideoDone done;
+        while ((done = videoDone.poll()) != null) {
+            Node n = done.node;
+            // La finalización ya ocurrió; no perder el evento «vend» si se inició otra reproducción antes del siguiente frame.
+            if (!nodes.contains(n)) continue;
+            for (int i = 0; i < n.script.size(); i++) {
+                Blk b = n.script.get(i);
+                if (b.t.equals("vend")) spawn(b.body, n);
+            }
+            queuePlaybackAfter(n, done.token);
+        }
+    }
+
     public void playSound(Node n) {
-        if (n.snd == null || n.snd.isEmpty()) return;
+        setPlaybackAfter(n, null, null);
+        playSound(n, n.playToken);
+    }
+
+    void playSound(Node n, final int token) {
+        if (n.snd == null || n.snd.isEmpty()) {
+            cancelPlaybackAfter(n);
+            return;
+        }
         try {
             if (n.mp == null || !n.snd.equals(n.mpName)) {
                 if (n.mp != null) n.mp.release();
@@ -1473,6 +1560,8 @@ public class Game {
                 n.mp.prepare();
                 n.mpName = n.snd;
             }
+            if (n.playAfter != null) n.mp.setOnCompletionListener(mp -> queuePlaybackAfter(n, token));
+            else n.mp.setOnCompletionListener(null);
             n.mp.setLooping(n.loop);
             n.mp.seekTo(0);
             n.mp.start();
@@ -1482,10 +1571,12 @@ public class Game {
             } catch (Exception e2) {
             }
             n.mp = null;
+            cancelPlaybackAfter(n);
         }
     }
 
     public void stopSound(Node n) {
+        cancelPlaybackAfter(n);
         try {
             if (n.mp != null && n.mp.isPlaying()) {
                 n.mp.pause();
@@ -1519,6 +1610,7 @@ public class Game {
 
     public void release() {
         for (Node n : nodes) {
+            cancelPlaybackAfter(n);
             if (n.mp != null) {
                 try {
                     n.mp.release();
@@ -1527,6 +1619,8 @@ public class Game {
                 n.mp = null;
             }
         }
+        playDone.clear();
+        videoDone.clear();
     }
 
     // ================= Variables =================
@@ -1792,7 +1886,7 @@ public class Game {
             boolean c = useCam && !n.fixed;
             float px = c ? (vx - vw / 2f) / camZ + camX : vx;
             float py = c ? (vy - vh / 2f) / camZ + camY : vy;
-            if (inNode(n, px, py) && (!n.smart || maskHit(n, mx, my))) return true;
+            if (inNode(n, px, py) && (!usesAlphaHit(n) || maskHit(n, mx, my))) return true;
         }
         return false;
     }
@@ -2262,18 +2356,22 @@ public class Game {
                 constrain(t);
                 break;
             case "setsnd":
+                cancelPlaybackAfter(t);
                 t.snd = b.s("asset");
                 break;
             case "play": {
                 String loop = b.s("loop");
                 if (loop.equals("activar") || loop.equals("desactivar")) t.loop = loop.equals("activar");
                 boolean reverse = b.s("dir").equals("reversa"), restart = b.b("restart");
-                if (t.type.equals("Sound")) playSound(t);
+                setPlaybackAfter(t, b.body, self);
+                int token = t.playToken;
+                if (t.type.equals("Sound")) playSound(t, token);
                 else if (t.type.equals("AnimatedSprite")) {
                     if (restart || (reverse && t.frame == 0)) t.frame = reverse ? Math.max(0, t.frames.size() - 1) : 0;
                     if (restart || t.backwards != reverse) t.ft = 0f;
                     t.backwards = reverse;
-                    t.playing = true;
+                    t.playing = !t.frames.isEmpty();
+                    if (t.frames.isEmpty()) cancelPlaybackAfter(t);
                 } else if (t.type.equals("Video")) {
                     t.backwards = reverse;
                     if (restart) t.vseek = -1f;
@@ -2283,10 +2381,13 @@ public class Game {
             }
             case "stop":
                 if (t.type.equals("Sound")) stopSound(t);
-                else if (t.type.equals("AnimatedSprite")) t.playing = false;
-                else if (t.type.equals("Video")) {
-                    t.vcmd = "stop";
-                    t.vseek = -1f;
+                else {
+                    cancelPlaybackAfter(t);
+                    if (t.type.equals("AnimatedSprite")) t.playing = false;
+                    else if (t.type.equals("Video")) {
+                        t.vcmd = "stop";
+                        t.vseek = -1f;
+                    }
                 }
                 break;
             case "vpause":
@@ -2302,6 +2403,7 @@ public class Game {
                 break;
             case "setvideo":
                 if (t.type.equals("Video")) {
+                    cancelPlaybackAfter(t);
                     t.res = b.s("asset");
                     t.vseek = -1f;
                     t.vcmd = "reload";
@@ -2912,7 +3014,8 @@ public class Game {
     public boolean active() {
         if (edit || hasPoll || hasCollisionEvents || hasVideo || !pendingClones.isEmpty()
                 || pendingScene != null || orientChanged || useCam) return true;
-        if (!tasks.isEmpty() || !tws.isEmpty() || !tweenAfter.isEmpty() || !holds.isEmpty() || !msgs.isEmpty() || !grabs.isEmpty()) return true;
+        if (!tasks.isEmpty() || !tws.isEmpty() || !tweenAfter.isEmpty() || !playDone.isEmpty()
+                || !videoDone.isEmpty() || !holds.isEmpty() || !msgs.isEmpty() || !grabs.isEmpty()) return true;
         for (Node n : nodes) {
             if (n.playing && n.type.equals("AnimatedSprite") && !n.frames.isEmpty()) return true;
         }
@@ -2938,6 +3041,7 @@ public class Game {
                         n.playing = false;
                         n.preview = false;
                         n.ft = 0;
+                        if (!edit) queuePlaybackAfter(n, n.playToken);
                         break;
                     }
                 }
@@ -2984,17 +3088,8 @@ public class Game {
             for (Object[] o : layerOps) layer((Node) o[0], (String) o[1]);
             layerOps.clear();
         }
-        if (hasVideo) {
-            for (int a = 0; a < nodes.size(); a++) {
-                Node n = nodes.get(a);
-                if (!n.vdone) continue;
-                n.vdone = false;
-                for (int i = 0; i < n.script.size(); i++) {
-                    Blk b = n.script.get(i);
-                    if (b.t.equals("vend")) spawn(b.body, n);
-                }
-            }
-        }
+        drainVideoDone();
+        drainPlaybackAfter();
         for (int i = tws.size() - 1; i >= 0; i--) {
             Tw t = tws.get(i);
             t.t += dt;
@@ -3218,7 +3313,7 @@ public class Game {
                     editBounds(n, n.wx, n.wy, editRect);
                     if (!editRect.contains(mx, my)) continue;
                 }
-                if (onlyTouchable && n.smart && !maskHit(n, mx, my)) continue;
+                if ((edit || onlyTouchable) && usesAlphaHit(n) && !maskHit(n, mx, my)) continue;
                 return n;
             }
         }
@@ -3303,7 +3398,7 @@ public class Game {
                     for (int y = y0; y < y1; y += sty) {
                         for (int x = x0; x < x1; x += stx) {
                             tot++;
-                            if (!alpha || (bm.getPixel(Math.min(x, bw - 1), Math.min(y, bh - 1)) >>> 24) > 25) on++;
+                            if (!alpha || (bm.getPixel(Math.min(x, bw - 1), Math.min(y, bh - 1)) >>> 24) != 0) on++;
                         }
                     }
                     m.b[cy * m.w + cx] = maj ? on * 2 >= tot : on > 0;
@@ -3314,18 +3409,25 @@ public class Game {
         return m;
     }
 
+    boolean usesAlphaHit(Node n) {
+        String name = maskImage(n);
+        return n.smart || (!name.isEmpty() && assetOrders.containsKey(name));
+    }
+
     boolean maskHit(Node n, float px, float py) {
         String name = maskImage(n);
         if (name.isEmpty()) return true;
-        Mask m = mask(name, n.smartRes, n.smartMaj);
-        if (m == null) return true;
+        Bitmap bm = img(name);
+        // Sin bitmap no hay alfa que consultar: conserva el hit box para poder editar recursos faltantes.
+        if (bm == null || bm.getWidth() <= 0 || bm.getHeight() <= 0) return true;
         imageBounds(n, name, n.wx, n.wy, maskRect);
-        if (!maskRect.contains(px, py)) return false;
-        int cx = (int) ((px - maskRect.left) / maskRect.width() * m.w);
-        int cy = (int) ((py - maskRect.top) / maskRect.height() * m.h);
-        cx = Math.max(0, Math.min(m.w - 1, cx));
-        cy = Math.max(0, Math.min(m.h - 1, cy));
-        return m.b[cy * m.w + cx];
+        if (maskRect.isEmpty() || !maskRect.contains(px, py)) return false;
+        int x = Math.min(bm.getWidth() - 1, Math.max(0,
+                (int) ((px - maskRect.left) / maskRect.width() * bm.getWidth())));
+        int y = Math.min(bm.getHeight() - 1, Math.max(0,
+                (int) ((py - maskRect.top) / maskRect.height() * bm.getHeight())));
+        // El alfa del recurso (incluidos valores parciales) es independiente de modulate.
+        return (bm.getPixel(x, y) >>> 24) != 0;
     }
 
     // 8 manijas redondas: 4 esquinas y 4 lados (0 = arriba izq., sentido horario)
@@ -3650,13 +3752,10 @@ public class Game {
         c.scale(sx, sy);
         if (workspace) {
             p.setStyle(Paint.Style.FILL);
+            p.setAntiAlias(false);
             p.setColor(bg);
             c.drawRect(0, 0, vw, vh, p);
-            p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(1f / Math.max(0.01f, sx));
-            p.setColor(0xFF798391);
-            c.drawRect(0, 0, vw, vh, p);
-            p.setStyle(Paint.Style.FILL);
+            p.setAntiAlias(true);
         } else {
             c.clipRect(0, 0, vw, vh);
             c.drawColor(bg);

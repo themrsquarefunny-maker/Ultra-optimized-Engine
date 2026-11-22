@@ -109,6 +109,10 @@ public class PlayActivity extends Activity {
                     finishAndRemoveTask();
                     android.os.Process.killProcess(android.os.Process.myPid());
                 }
+
+                public void wake() {
+                    if (v != null) v.postInvalidate();
+                }
             };
             setRequestedOrientation(g.landscape ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                     : ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);

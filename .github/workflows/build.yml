@@ -1,7 +1,7 @@
-name: Motor APK — última versión v13
+name: Motor APK — última versión v14
 on:
   push:
-    tags: ['v13']
+    tags: ['v14']
     branches: [main]
   workflow_dispatch:
 permissions:
@@ -48,20 +48,20 @@ jobs:
           (cd pack && zip -r ../base.apk assets)
           $BT/zipalign -f 4 base.apk aligned.apk
           keytool -genkeypair -keystore k.jks -alias a -keyalg RSA -keysize 2048 -validity 10000 -storepass 123456 -keypass 123456 -dname "CN=Motor"
-          $BT/apksigner sign --ks k.jks --ks-pass pass:123456 --out motor-v13.apk aligned.apk
-          $BT/apksigner verify motor-v13.apk
-          zip -j motor-v13.zip motor-v13.apk herramientas/trim-assets.html DOCUMENTACION.txt
-          unzip -tq motor-v13.zip
+          $BT/apksigner sign --ks k.jks --ks-pass pass:123456 --out motor-v14.apk aligned.apk
+          $BT/apksigner verify motor-v14.apk
+          zip -j motor-v14.zip motor-v14.apk herramientas/trim-assets.html DOCUMENTACION.txt
+          unzip -tq motor-v14.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: motor-v13
-          path: motor-v13.zip
-      - name: Publicar release (solo con tag v13)
-        if: github.ref == 'refs/tags/v13'
+          name: motor-v14
+          path: motor-v14.zip
+      - name: Publicar release (solo con tag v14)
+        if: github.ref == 'refs/tags/v14'
         uses: softprops/action-gh-release@v2
         with:
-          name: Motor v13 — Última versión
+          name: Motor v14 — Última versión
           make_latest: true
-          body_path: RELEASE-v13.md
+          body_path: RELEASE-v14.md
           fail_on_unmatched_files: true
-          files: motor-v13.zip
+          files: motor-v14.zip

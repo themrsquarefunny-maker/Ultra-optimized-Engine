@@ -8,7 +8,9 @@ import android.view.View;
 public class GameView extends View {
     public interface L {
         void sel(Game.Node n);
+        void beginEdit(Game.Node n);
         void moved(Game.Node n);
+        void endEdit(Game.Node n);
     }
 
     public L l;
@@ -70,6 +72,7 @@ public class GameView extends View {
             }
             if (rh >= 0) {
                 drag = g.sel;
+                if (drag != null && l != null) l.beginEdit(drag);
                 lx = vx;
                 ly = vy;
                 return true;
@@ -77,7 +80,10 @@ public class GameView extends View {
             drag = g.hit(vx, vy, false);
             lx = vx;
             ly = vy;
-            if (l != null) l.sel(drag);
+            if (l != null) {
+                l.sel(drag);
+                if (drag != null) l.beginEdit(drag);
+            }
         } else if (a == MotionEvent.ACTION_MOVE) {
             if (drag != null) {
                 if (rh >= 0) {
@@ -95,7 +101,10 @@ public class GameView extends View {
             }
             invalidate();
         } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
-            if (drag != null && l != null) l.moved(drag);
+            if (drag != null && l != null) {
+                l.endEdit(drag);
+                l.moved(drag);
+            }
             drag = null;
             rh = -1;
         }
