@@ -4,7 +4,6 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Build;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -131,50 +130,73 @@ public class Exporter {
                 || n.endsWith(".bmp");
     }
 
-    // mode: 0 = WebP con pérdida mínima (85%), 1 = WebP sin pérdida, 2 = no tocar
-    // Reduce la imagen si es más grande de lo que se usa en pantalla y la guarda solo si pesa menos.
-    static byte[] imageBytes(File f, float[] sz, boolean noDown, int mode) throws Exception {
-        byte[] raw;
-        try (FileInputStream fi = new FileInputStream(f)) {
-            raw = readAll(fi);
+    // mode: 0 = WebP con pérdida mínima (85%), 1 = calidad máxima, 2 = no tocar.
+    // Devuelve un temporal solo si la conversión ahorra espacio; null significa usar el original.
+    // El muestreo ocurre antes de decodificar para limitar el pico de memoria en dispositivos antiguos.
+    static File optimizedImage(File source, float[] size, boolean noDown, int mode, File cache) throws Exception {
+        if (mode == 2 || !isImg(source.getName())) return null;
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(source.getPath(), bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+
+        float scale = 1f;
+        if (!noDown && size != null && size[0] > 0 && size[1] > 0) {
+            scale = Math.min(1f, Math.max(size[0] / bounds.outWidth, size[1] / bounds.outHeight));
         }
-        if (mode == 2 || !isImg(f.getName())) return raw;
-        BitmapFactory.Options o = new BitmapFactory.Options();
-        o.inJustDecodeBounds = true;
-        BitmapFactory.decodeByteArray(raw, 0, raw.length, o);
-        if (o.outWidth <= 0 || o.outHeight <= 0) return raw;
-        Bitmap b = BitmapFactory.decodeByteArray(raw, 0, raw.length);
-        if (b == null) return raw;
-        if (!noDown && sz != null && sz[0] > 0 && sz[1] > 0) {
-            float k = Math.min(1f, Math.max(sz[0] / o.outWidth, sz[1] / o.outHeight));
-            if (k < 0.95f) {
-                b = Bitmap.createScaledBitmap(b, Math.max(1, Math.round(o.outWidth * k)),
-                        Math.max(1, Math.round(o.outHeight * k)), true);
+        BitmapFactory.Options decode = new BitmapFactory.Options();
+        decode.inSampleSize = 1;
+        while (bounds.outWidth / (decode.inSampleSize * 2) >= 1
+                && bounds.outHeight / (decode.inSampleSize * 2) >= 1
+                && decode.inSampleSize * 2 <= 1f / Math.max(scale, 0.0001f)) {
+            decode.inSampleSize *= 2;
+        }
+        Bitmap bitmap = BitmapFactory.decodeFile(source.getPath(), decode);
+        if (bitmap == null) return null;
+        Bitmap scaled = bitmap;
+        try {
+            if (scale < 0.95f) {
+                int width = Math.max(1, Math.round(bounds.outWidth * scale));
+                int height = Math.max(1, Math.round(bounds.outHeight * scale));
+                scaled = Bitmap.createScaledBitmap(bitmap, width, height, true);
             }
+            Bitmap.CompressFormat format = Bitmap.CompressFormat.WEBP;
+            if (Build.VERSION.SDK_INT >= 30) {
+                // Evita referencias estáticas a enum values no presentes en Android 5-10.
+                try {
+                    format = Bitmap.CompressFormat.valueOf(mode == 1 ? "WEBP_LOSSLESS" : "WEBP_LOSSY");
+                } catch (IllegalArgumentException ignored) { }
+            }
+            File converted = File.createTempFile("img-opt-", ".webp", cache);
+            boolean ok;
+            try (FileOutputStream stream = new FileOutputStream(converted)) {
+                ok = scaled.compress(format, mode == 1 ? 100 : 85, stream);
+                stream.flush();
+            }
+            if (ok && converted.length() > 0 && converted.length() < source.length()) return converted;
+            converted.delete();
+            return null;
+        } finally {
+            if (scaled != bitmap && !scaled.isRecycled()) scaled.recycle();
+            if (!bitmap.isRecycled()) bitmap.recycle();
         }
-        Bitmap.CompressFormat fmt;
-        int q;
-        boolean api30 = Build.VERSION.SDK_INT >= 30;
-        if (mode == 1) {
-            fmt = api30 ? Bitmap.CompressFormat.WEBP_LOSSLESS : Bitmap.CompressFormat.WEBP;
-            q = 100;
-        } else {
-            fmt = api30 ? Bitmap.CompressFormat.WEBP_LOSSY : Bitmap.CompressFormat.WEBP;
-            q = 85;
-        }
-        ByteArrayOutputStream bo = new ByteArrayOutputStream();
-        b.compress(fmt, q, bo);
-        byte[] out = bo.toByteArray();
-        return out.length > 0 && out.length < raw.length ? out : raw;
+    }
+
+    static void copy(InputStream in, java.io.OutputStream out) throws Exception {
+        byte[] buffer = new byte[16384];
+        int n;
+        while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
+    }
+
+    static void putBytes(ZipOutputStream zip, String name, byte[] data) throws Exception {
+        zip.putNextEntry(new ZipEntry(name));
+        zip.write(data);
+        zip.closeEntry();
     }
 
     public static void build(Context c, String json, File adir, Set<String> used,
                              HashMap<String, float[]> sizes, boolean noDown, int imgMode,
                              byte[] icon, String name, String ver, String pkgIn, File out) throws Exception {
-        byte[] tpl;
-        try (InputStream i = c.getAssets().open("template.apk")) {
-            tpl = readAll(i);
-        }
         byte[] md = MessageDigest.getInstance("MD5").digest(name.getBytes("UTF-8"));
         StringBuilder hex = new StringBuilder();
         for (byte b : md) hex.append(String.format("%02x", b));
@@ -182,32 +204,46 @@ public class Exporter {
 
         File unsigned = new File(c.getCacheDir(), "unsigned.apk");
         if (unsigned.exists()) unsigned.delete();
-        try (ZipInputStream zin = new ZipInputStream(new ByteArrayInputStream(tpl));
+        try (InputStream template = c.getAssets().open("template.apk");
+             ZipInputStream zin = new ZipInputStream(template);
              ZipOutputStream zo = new ZipOutputStream(new FileOutputStream(unsigned))) {
             zo.setLevel(9);
-            ZipEntry e;
-            while ((e = zin.getNextEntry()) != null) {
-                String n = e.getName();
-                if (e.isDirectory() || n.startsWith("META-INF/")) continue;
-                byte[] data = readAll(zin);
-                if (n.equals("AndroidManifest.xml")) data = patch(data, pkg, name, ver);
-                if (icon != null && n.startsWith("res/") && n.endsWith("/ic.png")) data = icon;
-                zo.putNextEntry(new ZipEntry(n));
-                zo.write(data);
-                zo.closeEntry();
+            ZipEntry entry;
+            byte[] buffer = new byte[16384];
+            while ((entry = zin.getNextEntry()) != null) {
+                String path = entry.getName();
+                if (entry.isDirectory() || path.startsWith("META-INF/")) continue;
+                if (path.equals("AndroidManifest.xml")) {
+                    byte[] manifest = patch(readAll(zin), pkg, name, ver);
+                    putBytes(zo, path, manifest);
+                } else if (icon != null && path.startsWith("res/") && path.endsWith("/ic.png")) {
+                    putBytes(zo, path, icon);
+                } else {
+                    zo.putNextEntry(new ZipEntry(path));
+                    int n;
+                    while ((n = zin.read(buffer)) != -1) zo.write(buffer, 0, n);
+                    zo.closeEntry();
+                }
             }
-            zo.putNextEntry(new ZipEntry("assets/game.json"));
-            zo.write(json.getBytes("UTF-8"));
-            zo.closeEntry();
-            for (String a : used) {
-                File f = new File(adir, a);
-                if (!f.exists()) continue;
-                zo.putNextEntry(new ZipEntry("assets/a/" + a));
-                zo.write(imageBytes(f, sizes.get(a), noDown, imgMode));
-                zo.closeEntry();
+            putBytes(zo, "assets/game.json", json.getBytes("UTF-8"));
+            for (String asset : used) {
+                File source = new File(adir, asset);
+                if (!source.isFile()) continue;
+                File converted = optimizedImage(source, sizes.get(asset), noDown, imgMode, c.getCacheDir());
+                File chosen = converted == null ? source : converted;
+                try (InputStream input = new FileInputStream(chosen)) {
+                    zo.putNextEntry(new ZipEntry("assets/a/" + asset));
+                    copy(input, zo);
+                    zo.closeEntry();
+                } finally {
+                    if (converted != null) converted.delete();
+                }
             }
         }
-        Sign.sign(c, unsigned, out);
-        unsigned.delete();
+        try {
+            Sign.sign(c, unsigned, out);
+        } finally {
+            unsigned.delete();
+        }
     }
 }
